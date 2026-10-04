@@ -83,6 +83,7 @@ coverage.xml
 # Only genuinely machine-local editor state is ignored. The project's own
 # `.vscode/settings.json` (Python interpreter, pytest and test paths) and
 # `extension/.vscode/launch.json` are intentional source and stay tracked.
+.vscode/
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
