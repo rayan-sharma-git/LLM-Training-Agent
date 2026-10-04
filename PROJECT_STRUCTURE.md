@@ -17,6 +17,8 @@ two source roots, and that is the real architecture.
 ├── LICENSE                   # MIT
 ├── requirements.txt          # Full backend + dev dependency set
 ├── .gitignore
+├── .github/
+│   └── PULL_REQUEST_TEMPLATE.md  # Checklist shown when opening a pull request
 ├── .vscode/
 │   ├── settings.json         # Project config: venv310 interpreter, pytest paths, excludes
 │   ├── tasks.json            # Build / test / package tasks bound to venv310 + npm
@@ -36,9 +38,11 @@ two source roots, and that is the real architecture.
 |---|---|
 | `requirements.txt` | Full backend dependency set including tests and linting. **Developers only** — normal extension users do not need it. |
 | `llm-training-agent-1.0.0.vsix` | The packaged, installable extension. Downloaded directly from the repository root; see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md). |
-| `.gitignore` | Excludes `venv310/` (whole directory), `node_modules/`, Python caches and `.db` files, `extension/out/`, `extension/backend/` (generated), and the working VSIX inside `extension/`. The root VSIX is deliberately **not** ignored, because it is meant to be distributed. Editor-local state under `.vscode/` is ignored, but the project's own `.vscode/settings.json`, `tasks.json`, `extensions.json` and `extension/.vscode/launch.json` are tracked. |
+| `.gitignore` | Excludes `venv310/` (whole directory), `node_modules/`, Python caches and `.db` files, `extension/out/`, `extension/backend/` (generated), and the working VSIX inside `extension/`. The root VSIX is deliberately **not** ignored, because it is meant to be distributed. Editor-local state under `.vscode/` and `extension/.vscode/` is ignored, but the shared configuration `.vscode/settings.json`, `.vscode/tasks.json`, `.vscode/extensions.json` and `extension/.vscode/launch.json` are tracked. |
 | `.vscode/settings.json` | Project-level editor config: points the Python interpreter at `venv310\Scripts\python.exe`, sets the pytest path to `backend/tests`, and keeps `venv310`, `node_modules` and the generated `extension/backend` + `extension/out` out of the file watcher and search index. |
 | `.vscode/tasks.json` | Build/test/package tasks: install deps into `venv310`, run backend `pytest`, run `npm run compile` / `npm test` / `npm run package` in `extension/`. |
+| `.vscode/extensions.json` | Recommended extensions for this repository. |
+| `.github/PULL_REQUEST_TEMPLATE.md` | The checklist GitHub pre-fills on every new pull request. It repeats the invariants from [CONTRIBUTING.md](CONTRIBUTING.md) — tests, no architecture changes, no fabricated values, VSIX rebuilt if packaging changed, root documentation updated. |
 | `LICENSE` | MIT. |
 
 The six documentation files live **only** at the repository root. Do not add copies
@@ -100,6 +104,20 @@ backend/
 │   └── engine.py             # Prioritised recommendations with reasoning
 ├── reports/
 │   └── generator.py          # Engineering report, readiness score, action plan
+├── editing/
+│   └── file_editor.py        # ChangeStore: PROPOSED -> APPROVED -> APPLIED lifecycle
+├── experiments/
+│   └── service.py            # Experiment CRUD and comparison
+├── storage/
+│   ├── database.py           # Async SQLAlchemy engine, SQLite
+│   ├── migrations.py         # Versioned schema
+│   ├── models.py             # ORM models
+│   ├── repositories.py       # Data access
+│   └── analysis_store.py     # Analysis run lifecycle and status
+├── models/
+│   └── schemas.py            # Pydantic request/response models (the API contract)
+└── tests/                    # pytest suite
+```
 
 ---
 
@@ -114,6 +132,8 @@ extension/
 ├── tsconfig.json             # TypeScript configuration
 ├── vitest.config.ts          # Test configuration
 ├── .vscodeignore             # Controls what is and is not shipped inside the VSIX
+├── .vscode/
+│   └── launch.json           # F5 debug config: runs the extension in an Extension Development Host
 ├── resources/
 │   └── icon.svg              # Activity bar icon
 ├── src/
@@ -189,6 +209,11 @@ Both are listed in `.gitignore`. Editing them is the fastest way to lose work.
 | I want to change | Look in |
 |---|---|
 | Add a provider | A new file in `backend/ai/providers/`, then register it in `backend/ai/providers/__init__.py` |
+| How a provider is called | `backend/ai/llm.py` (the `LLMHelper` degrades gracefully when none is available) |
+| The provider interface | `backend/ai/provider.py` |
+| Which provider/model is active | `backend/core/config.py` (`get_active_provider`, `get_active_model`) |
+| API keys | `backend/core/runtime_config.py` (in memory only) |
+| Prompt wording | `backend/ai/prompts/` (`.md` files, bundled into the VSIX) |
 
 ### Analysis logic
 
@@ -286,24 +311,3 @@ Both are listed in `.gitignore`. Editing them is the fastest way to lose work.
   `extension/tests/suite/extensionPaths.test.ts` and by the VSIX audit.
 - **Values carry provenance.** Analysis output is labelled *measured*, *calculated*,
   *heuristic* or *assumed*. Preserve this when adding an analyzer.
-
-| How a provider is called | `backend/ai/llm.py` (the `LLMHelper` degrades gracefully when none is available) |
-| The provider interface | `backend/ai/provider.py` |
-| Which provider/model is active | `backend/core/config.py` (`get_active_provider`, `get_active_model`) |
-| API keys | `backend/core/runtime_config.py` (in memory only) |
-| Prompt wording | `backend/ai/prompts/` (`.md` files, bundled into the VSIX) |
-
-├── editing/
-│   └── file_editor.py        # ChangeStore: PROPOSED -> APPROVED -> APPLIED lifecycle
-├── experiments/
-│   └── service.py            # Experiment CRUD and comparison
-├── storage/
-│   ├── database.py           # Async SQLAlchemy engine, SQLite
-│   ├── migrations.py         # Versioned schema
-│   ├── models.py             # ORM models
-│   ├── repositories.py       # Data access
-│   └── analysis_store.py     # Analysis run lifecycle and status
-├── models/
-│   └── schemas.py            # Pydantic request/response models (the API contract)
-└── tests/                    # pytest suite
-```
