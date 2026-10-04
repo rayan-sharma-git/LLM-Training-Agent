@@ -1,0 +1,49 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Backend: install dependencies (venv310)",
+      "type": "shell",
+      "command": "${workspaceFolder}\\venv310\\Scripts\\python.exe -m pip install -r requirements.txt",
+      "problemMatcher": []
+    },
+    {
+      "label": "Backend: run tests",
+      "type": "shell",
+      "command": "${workspaceFolder}\\venv310\\Scripts\\python.exe -m pytest tests -q",
+      "options": { "cwd": "${workspaceFolder}\\backend" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Extension: install dependencies",
+      "type": "shell",
+      "command": "npm install",
+      "options": { "cwd": "${workspaceFolder}\\extension" },
+      "problemMatcher": []
+    },
+    {
+      "label": "Extension: compile",
+      "type": "shell",
+      "command": "npm run compile",
+      "options": { "cwd": "${workspaceFolder}\\extension" },
+      "group": "build",
+      "problemMatcher": ["$tsc"]
+    },
+    {
+      "label": "Extension: test",
+      "type": "shell",
+      "command": "npm test",
+      "options": { "cwd": "${workspaceFolder}\\extension" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "Extension: package VSIX",
+      "type": "shell",
+      "command": "npm run package",
+      "options": { "cwd": "${workspaceFolder}\\extension" },
+      "problemMatcher": []
+    }
+  ]
+}

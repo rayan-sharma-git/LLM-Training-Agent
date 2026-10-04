@@ -5,12 +5,6 @@ __pycache__/
 *.so
 *.pyo
 
-# C extensions
-*.c
-*.cpp
-*.h
-*.hpp
-
 # Distribution / packaging
 .Python
 build/
@@ -81,9 +75,14 @@ coverage.xml
 # IDE / Editor
 #
 # Only genuinely machine-local editor state is ignored. The project's own
-# `.vscode/settings.json` (Python interpreter, pytest and test paths) and
-# `extension/.vscode/launch.json` are intentional source and stay tracked.
-.vscode/
+# `.vscode/settings.json` (Python interpreter, pytest and test paths),
+# `.vscode/tasks.json` and `.vscode/extensions.json` are shared development
+# configuration referenced by PROJECT_STRUCTURE.md and must stay tracked.
+#
+# There is deliberately no bare `.vscode/` rule here: because it ends with a
+# slash, git never descends into the directory, which would make the
+# negations below unreachable and the shared config untrackable. Ignoring the
+# directory's *contents* with `.vscode/*` instead keeps the negations working.
 .vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
@@ -116,7 +115,8 @@ node_modules/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-yarn.lock
+# NOTE: `yarn.lock` is intentionally NOT ignored — `extension/package-lock.json`
+# is version-controlled, so lockfiles are treated as source in this project.
 
 # Logs
 *.log
