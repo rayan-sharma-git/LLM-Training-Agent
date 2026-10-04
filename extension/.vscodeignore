@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# Development-only files
+# ---------------------------------------------------------------------------
+.vscode/**
+.vscode-test/**
+out-test/**
+src/**
+tests/**
+scripts/**
+tsconfig.json
+vitest.config.ts
+**/*.ts
+**/*.map
+
+# Previously built packages and local backups
+*.vsix
+out_backup.zip
+*.vsix.zip
+*.log
+
+# ---------------------------------------------------------------------------
+# node_modules
+#
+# vsce automatically includes only the *production* dependency tree declared
+# in "dependencies" (here: axios and its transitive deps), which the compiled
+# extension requires at runtime. Listing "node_modules" here would strip axios
+# and break activation, so dev-only packages are excluded individually instead.
+# ---------------------------------------------------------------------------
+node_modules/.bin/**
+node_modules/.vite/**
+node_modules/.cache/**
+node_modules/**/*.md
+node_modules/**/*.ts
+node_modules/**/*.map
+node_modules/@types/**
+node_modules/@vscode/**
+node_modules/@vitest/**
+node_modules/vitest/**
+node_modules/typescript/**
+node_modules/@esbuild/**
+node_modules/@rollup/**
+node_modules/esbuild/**
+node_modules/rollup/**
+node_modules/@jridgewell/**
+node_modules/acorn/**
+
+# ---------------------------------------------------------------------------
+# Bundled Python backend: keep the code, drop caches, logs and local data.
+# ---------------------------------------------------------------------------
+**/__pycache__/**
+**/*.pyc
+**/*.pyo
+**/.mypy_cache/**
+**/.pytest_cache/**
+**/.ruff_cache/**
+**/tests/**
+**/venv*/
+**/.venv*/
+**/.env
+**/.env.*
+backend/*.db
+backend/*.db-*
+backend/*.log
+**/*.db
+**/*.db-wal
+**/*.db-shm

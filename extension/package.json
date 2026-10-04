@@ -1,0 +1,214 @@
+{
+  "name": "llm-training-agent",
+  "displayName": "LLM Training Agent",
+  "version": "1.0.0",
+  "publisher": "rayansharma",
+  "description": "AI-powered engineering assistant for LLM fine-tuning",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rayan-sharma-git/llm-training-agent.git"
+  },
+  "homepage": "https://github.com/rayan-sharma-git/llm-training-agent",
+  "bugs": {
+    "url": "https://github.com/rayan-sharma-git/llm-training-agent/issues"
+  },
+  "license": "MIT",
+  "keywords": ["llm", "fine-tuning", "training", "ai", "machine-learning"],
+  "categories": ["Machine Learning", "Data Science"],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:llmTrainingAgent.overview",
+    "onView:llmTrainingAgent.chat",
+    "onView:llmTrainingAgent.reports",
+    "onView:llmTrainingAgent.settings",
+    "onCommand:llmTrainingAgent.analyzeProject",
+    "onCommand:llmTrainingAgent.analyzeDataset",
+    "onCommand:llmTrainingAgent.openChat",
+    "onCommand:llmTrainingAgent.viewReport",
+    "onCommand:llmTrainingAgent.configureProvider",
+    "onCommand:llmTrainingAgent.viewChanges"
+  ],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "llm-training-agent",
+          "title": "LLM Training Agent",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "llm-training-agent": [
+        {
+          "id": "llmTrainingAgent.overview",
+          "name": "Overview",
+          "type": "tree",
+          "icon": "$(dashboard)"
+        },
+        {
+          "id": "llmTrainingAgent.chat",
+          "name": "Chat",
+          "type": "webview",
+          "icon": "$(comment-discussion)"
+        },
+        {
+          "id": "llmTrainingAgent.reports",
+          "name": "Reports",
+          "type": "tree",
+          "icon": "$(file-text)"
+        },
+        {
+          "id": "llmTrainingAgent.settings",
+          "name": "Settings",
+          "type": "webview",
+          "icon": "$(gear)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "llmTrainingAgent.analyzeProject",
+        "title": "Analyze Project",
+        "category": "LLM Training Agent",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "llmTrainingAgent.analyzeDataset",
+        "title": "Analyze Dataset",
+        "category": "LLM Training Agent",
+        "icon": "$(database)"
+      },
+      {
+        "command": "llmTrainingAgent.openChat",
+        "title": "Open Chat",
+        "category": "LLM Training Agent",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "llmTrainingAgent.viewReport",
+        "title": "View Report",
+        "category": "LLM Training Agent",
+        "icon": "$(file-text)"
+      },
+      {
+        "command": "llmTrainingAgent.configureProvider",
+        "title": "Configure AI Provider",
+        "category": "LLM Training Agent",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "llmTrainingAgent.viewChanges",
+        "title": "View Changes",
+        "category": "LLM Training Agent",
+        "icon": "$(diff)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "llmTrainingAgent.analyzeProject",
+          "when": "view == llmTrainingAgent.overview",
+          "group": "navigation"
+        },
+        {
+          "command": "llmTrainingAgent.openChat",
+          "when": "view == llmTrainingAgent.chat",
+          "group": "navigation"
+        },
+        {
+          "command": "llmTrainingAgent.viewReport",
+          "when": "view == llmTrainingAgent.reports",
+          "group": "navigation"
+        },
+        {
+          "command": "llmTrainingAgent.viewChanges",
+          "when": "view == llmTrainingAgent.overview",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "llmTrainingAgent.analyzeProject"
+        },
+        {
+          "command": "llmTrainingAgent.analyzeDataset"
+        },
+        {
+          "command": "llmTrainingAgent.openChat"
+        },
+        {
+          "command": "llmTrainingAgent.viewReport"
+        },
+        {
+          "command": "llmTrainingAgent.configureProvider"
+        },
+        {
+          "command": "llmTrainingAgent.viewChanges"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LLM Training Agent",
+      "properties": {
+        "llmTrainingAgent.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "scope": "window",
+          "markdownDescription": "Base URL of the agent backend. Normally the bundled backend is started automatically; change this only to point at an externally managed backend."
+        },
+        "llmTrainingAgent.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "Absolute path to the Python interpreter used to run the bundled backend (for example `C:\\Python312\\python.exe`). Leave empty to use the interpreter bundled with the extension, or `python` from your PATH. This is a **user-level** setting: it is never required inside a project."
+        },
+        "llmTrainingAgent.provider": {
+          "type": "string",
+          "enum": [
+            "ollama",
+            "openai",
+            "anthropic",
+            "gemini",
+            "deepseek",
+            "cohere",
+            "openrouter",
+            "openai_compatible"
+          ],
+          "default": "ollama",
+          "scope": "application",
+          "description": "LLM provider. User-level: it applies to every project and is never stored in a project."
+        },
+        "llmTrainingAgent.model": {
+          "type": "string",
+          "default": "llama3.2",
+          "scope": "application",
+          "description": "LLM model name. User-level: it applies to every project and is never stored in a project."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package:backend && npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "vitest run",
+    "package:backend": "node scripts/sync-backend.js",
+    "prepackage": "npm run package:backend && npm run compile",
+    "package": "vsce package",
+    "lint": "tsc --noEmit -p ./"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.24.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
+  }
+}

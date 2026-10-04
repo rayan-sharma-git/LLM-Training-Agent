@@ -1,0 +1,51 @@
+# LLM Training Agent — developer / backend dependencies.
+#
+# Normal users do NOT need to install this file merely to install or use the
+# packaged VS Code extension. The VSIX already bundles the Python backend, and
+# the extension resolves a Python interpreter on its own. For normal extension
+# installation, see INSTALLATION_GUIDE.md. For uninstalling, see DELETION.md.
+#
+# This file is the full backend dependency set, for developers who want to run,
+# modify, test or repackage the FastAPI backend in `backend/`:
+#
+#     python -m pip install -r requirements.txt
+#
+# Runtime-only dependencies also live in `backend/requirements.txt`, which is
+# the file the extension itself checks at runtime. The backend copy is a strict
+# subset of this file; keep the two in sync when adding a dependency.
+#
+# Tested with Python 3.10.6.
+
+# --- Web framework / ASGI server ---
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# --- Configuration & validation ---
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+python-dotenv==1.0.0
+tomli>=1.2.3; python_version < "3.11"
+
+# --- Persistence (SQLite via async SQLAlchemy) ---
+sqlalchemy==2.0.23
+aiosqlite==0.19.0
+
+# --- Optional (used when present, with a stdlib fallback) ---
+# Real YAML parsing of training configs. Without it the hyperparameter
+# analyzer falls back to regex extraction, which is less accurate.
+PyYAML==6.0.3
+
+# --- HTTP client (LLM provider REST calls) ---
+httpx==0.25.2
+
+# --- Optional provider SDKs (Gemini / Cohere) ---
+google-generativeai==0.7.2
+cohere>=5.9.0,<5.11.0
+
+# --- Tests & code quality (development only) ---
+pytest==7.4.3
+pytest-asyncio==0.21.1
+ruff==0.1.6
+black==23.12.0
+mypy==1.7.1
+

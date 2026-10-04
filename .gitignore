@@ -1,0 +1,186 @@
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyo
+
+# C extensions
+*.c
+*.cpp
+*.h
+*.hpp
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+#
+# `venv310/` is the whole-directory ignore: it matches the directory and, because
+# it ends with a slash, git never descends into it. Listing its sub-paths
+# individually (Lib/, Scripts/, Include/, *.exe, ...) was redundant, and any file
+# type added by a future Python/pip release outside that hand-written list would
+# have been tracked. One directory rule cannot go stale.
+venv/
+venv*/
+.venv/
+.venv*/
+ENV/
+env/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+coverage/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# Environment variables
+.env
+.env.*
+!.env.example
+.env.local
+.env.development
+.env.test
+.env.production
+
+# IDE / Editor
+#
+# Only genuinely machine-local editor state is ignored. The project's own
+# `.vscode/settings.json` (Python interpreter, pytest and test paths) and
+# `extension/.vscode/launch.json` are intentional source and stay tracked.
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json
+!.vscode/launch.json
+extension/.vscode/*
+!extension/.vscode/launch.json
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+.settings/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+yarn.lock
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.so.*
+*.a
+*.lib
+*.out
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*~
+
+# ---------------------------------------------------------------------------
+# Extension build artifacts
+#
+# `extension/backend/` is GENERATED from `backend/` by scripts/sync-backend.js
+# and `extension/out/` is GENERATED from `src/` by tsc. Neither is source: edit
+# `backend/` and `extension/src/` instead.
+#
+# The root `*.vsix` is deliberately NOT ignored — it is the installable
+# artifact that users download straight from the repository root.
+# ---------------------------------------------------------------------------
+extension/backend/
+extension/out/
+extension/dist/
+extension/.vscode-test/
+extension/out-test/
+extension/node_modules/
+extension/*.vsix
+extension/*.log
+
+# Working copies of the VSIX produced by `npm run package`.
+#
+# `extension/*.vsix` (above) covers the build directory. The released copy at the
+# repository root is deliberately NOT ignored and is NOT version-pinned: an earlier
+# `/llm-training-agent-*.vsix` + `!/llm-training-agent-1.0.0.vsix` pair silently
+# started ignoring a freshly built 1.0.1 VSIX, which would have shipped a stale
+# download link in INSTALLATION_GUIDE.md. Ignoring nothing at the root is correct.
+
+# ---------------------------------------------------------------------------
+# Local runtime data (recreated on first start)
+#
+# The backend stores its SQLite database, WAL and shared-memory index next to
+# the running backend (`llm_training_agent.db*`). These are per-machine runtime
+# state, never source, and must not be tracked.
+# ---------------------------------------------------------------------------
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ---------------------------------------------------------------------------
+# Root-level build/test noise
+# ---------------------------------------------------------------------------
+*.generated.md
+
