@@ -26,20 +26,32 @@ export async function activate(context: vscode.ExtensionContext) {
     // Lazy startup: the backend is started on first use, not on activation.
     // This keeps activation cheap and avoids spawning Python for users who
     // never invoke the agent in a given window.
+    //
+    // The promise is cleared after a FAILED attempt so the next action retries
+    // instead of replaying the cached failure forever. Without the reset, a
+    // single failed start (e.g. backend still unpacking on first run) would
+    // make every button in the window fail until the user reloaded VS Code.
     let startupPromise: Promise<boolean> | null = null;
     const ensureBackend = (): Promise<boolean> => {
       if (!startupPromise) {
-        startupPromise = backendManager.ensureRunning().then((ok) => {
-          if (!ok) {
-            vscode.window.showWarningMessage(
-              'LLM Training Agent: the Python backend could not be started. ' +
-                'Check the "LLM Training Agent: Backend" output channel. ' +
-                'If Python dependencies are missing, run "Analyze Project" to be ' +
-                'offered the dependency install.'
-            );
+        startupPromise = backendManager.ensureRunning().then(
+          (ok) => {
+            if (!ok) {
+              startupPromise = null;
+              vscode.window.showWarningMessage(
+                'LLM Training Agent: the Python backend could not be started. ' +
+                  'Check the "LLM Training Agent: Backend" output channel. ' +
+                  'If Python dependencies are missing, run "Analyze Project" to be ' +
+                  'offered the dependency install.'
+              );
+            }
+            return ok;
+          },
+          (error) => {
+            startupPromise = null;
+            throw error;
           }
-          return ok;
-        });
+        );
       }
       return startupPromise;
     };
@@ -89,7 +101,9 @@ export async function activate(context: vscode.ExtensionContext) {
     );
 
     // --- Settings webview view ---
-    const settingsProvider = new SettingsWebviewProvider(context.extensionUri, apiClient, settings);
+    // Pass `ensureBackend` so saving settings starts the bundled backend on
+    // first use, exactly like the chat view already does.
+    const settingsProvider = new SettingsWebviewProvider(context.extensionUri, apiClient, settings, ensureBackend);
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider(SettingsWebviewProvider.viewType, settingsProvider, {
         webviewOptions: { retainContextWhenHidden: true },

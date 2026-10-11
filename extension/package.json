@@ -197,8 +197,10 @@
     "watch": "tsc -watch -p ./",
     "test": "vitest run",
     "package:backend": "node scripts/sync-backend.js",
+    "prelaunch": "npm run package:backend && npm run compile",
     "prepackage": "npm run package:backend && npm run compile",
     "package": "vsce package",
+    "verify:wiring": "npm run compile && node scripts/verify-webview-wiring.js",
     "lint": "tsc --noEmit -p ./"
   },
   "dependencies": {

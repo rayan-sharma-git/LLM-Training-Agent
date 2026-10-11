@@ -13,8 +13,32 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly _extensionUri: vscode.Uri,
     private readonly _apiClient: ApiClient,
-    private readonly _settings: SettingsManager
+    private readonly _settings: SettingsManager,
+    private readonly _ensureBackend?: () => Promise<boolean>
   ) {}
+
+  /**
+   * Start the bundled backend on first use (mirrors the chat view).
+   *
+   * The extension activates lazily and never spawns Python until it is
+   * needed. Every other caller awaits `ensureBackend` before touching the
+   * API; the settings view must do the same, otherwise saving settings in a
+   * fresh window fails with ECONNREFUSED even though nothing is broken.
+   * Throws when the backend could not be started so the caller surfaces the
+   * standard "Settings update failed" message with actionable details.
+   */
+  private async _ensureBackendReady(): Promise<void> {
+    if (!this._ensureBackend) {
+      return;
+    }
+    const ok = await this._ensureBackend();
+    if (!ok) {
+      throw new Error(
+        'The Python backend could not be started. ' +
+          'Check the "LLM Training Agent: Backend" output channel for details.'
+      );
+    }
+  }
 
   public resolveWebviewView(
     webviewView: vscode.WebviewView,
@@ -44,14 +68,23 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               const { provider, model } = message;
               if (typeof provider !== 'string' || typeof model !== 'string') return;
               if (provider.length > 64 || model.length > 255) return;
-              await this._apiClient.selectProvider(provider, model);
+              await this._ensureBackendReady();
               await this._settings.updateSettings({ provider, model });
+              try {
+                await this._apiClient.selectProvider(provider, model);
+              } catch (error) {
+                // The VS Code setting is already saved; still surface the
+                // backend failure so the mismatch is visible, then refresh.
+                this._updateUI();
+                throw error;
+              }
               this._updateUI();
               break;
             }
             case 'saveApiKey': {
               const { provider, apiKey } = message;
               if (typeof provider !== 'string' || provider.length > 64 || typeof apiKey !== 'string' || apiKey.length > 4096) return;
+              await this._ensureBackendReady();
               if (apiKey && apiKey.trim()) {
                 await this._apiClient.setApiKey(provider, apiKey.trim());
                 await this._apiClient.updateConfig({ provider, apiKey: apiKey.trim() });
@@ -68,6 +101,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
             }
             case 'testConnection': {
               const { provider, model, apiKey, baseUrl } = message;
+              await this._ensureBackendReady();
               const result = await this._apiClient.testConnection({
                 provider,
                 model,
@@ -84,6 +118,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
             }
             case 'removeApiKey': {
               const { provider } = message;
+              await this._ensureBackendReady();
               await this._apiClient.removeApiKey(provider);
               await this._apiClient.removeApiKeyBackend(provider);
               this._updateUI();
@@ -139,6 +174,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
 
   private async _refreshModels(provider: string): Promise<void> {
     try {
+      await this._ensureBackendReady();
       const result = await this._apiClient.getProviderModels(provider);
       if (result.models.length > 0) {
         vscode.window.showInformationMessage(
@@ -530,7 +566,10 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     }
 
     // Init
-    document.addEventListener('DOMContentLoaded', function () {
+    // Called immediately: this script runs after the elements above, and a
+    // DOMContentLoaded wrapper is unreliable here — the webview document may
+    // already be past that point, leaving every button unwired with no error.
+    function initSettingsUi() {
       updateProviderUI();
 
       document.getElementById('providerSelect').addEventListener('change', function () {
@@ -547,7 +586,8 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
           setStatus('API key entered — clicking Save stores it securely.', false);
         }
       });
-    });
+    }
+    initSettingsUi();
   </script>
 </body>
 </html>`;

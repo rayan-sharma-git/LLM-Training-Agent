@@ -104,8 +104,9 @@ export class ApiClient {
         if (error.code === 'ECONNREFUSED') {
           throw new ApiError(
             'Could not connect to the backend. The Python backend may not be running. ' +
-            'Try reloading the VS Code window, or start it manually: ' +
-            'cd backend && python -m uvicorn main:app --port 8000',
+            'Use any agent action (for example Analyze Project) so the extension starts ' +
+            'its bundled backend, or check the "LLM Training Agent: Backend" output channel. ' +
+            'Advanced: point "llmTrainingAgent.backendUrl" at an externally managed backend.',
             0,
             { reason: 'connection_refused' }
           );

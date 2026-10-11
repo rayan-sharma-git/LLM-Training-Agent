@@ -597,6 +597,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
 
     // Tell the extension we are ready to receive restored history.
     vscode.postMessage({ command: 'ready' });
+    // NOTE: no DOMContentLoaded wrapper here. This script runs at the end of
+    // <body>, after #input/#send exist; the webview may already be past
+    // DOMContentLoaded, in which case deferred listeners never fire and the
+    // Send button silently does nothing.
   </script>
 </body>
 </html>`;
