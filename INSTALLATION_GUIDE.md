@@ -20,6 +20,13 @@ llm-training-agent-1.0.0.vsix
 `extension/`, `build/`, `dist/`, or any other folder — the VSIX is the single file at
 the top level of the repository, next to `README.md`.
 
+If you are viewing the repository on GitHub in your browser (no cloning):
+
+1. Open the `llm-training-agent-1.0.0.vsix` file in the repository's root directory.
+2. Click **View Raw** to download the file.
+3. Save it in any folder you prefer, such as **Downloads**. It can be on the C: drive, D: drive, or another location. **There is no required download folder or special path.** Just remember where you saved it so you can select the file during installation.
+4. Downloading the file does not install the extension. You must still follow the VS Code **Extensions → three dots → Install from VSIX...** steps below and select the downloaded file.
+
 If you are cloning the repository, the file is already there after cloning.
 
 ---

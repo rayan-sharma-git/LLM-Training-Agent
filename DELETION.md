@@ -10,6 +10,23 @@ How to remove the LLM Training Agent extension and its leftover files.
 
 Alternatively, run `code --uninstall-extension rayansharma.llm-training-agent` if the `code` command is on your PATH.
 
+### Where the installed extension lives (Windows)
+
+The usual Windows location is:
+
+```
+C:\Users\<your-Windows-username>\.vscode\extensions\
+```
+
+To find it:
+
+1. Open File Explorer.
+2. Open the C: drive, then `Users`, then the folder named after your Windows account.
+3. Look for `.vscode`, open `extensions`, and find the folder belonging to **LLM Training Agent**.
+4. If that extension folder remains after uninstalling it through VS Code, delete only that specific folder.
+
+This is the **usual location**, not a guaranteed location on every computer. Do not delete the entire `.vscode` folder or any other extension's folder. If `.vscode` is not there, leave everything as it is — there is nothing further to delete here.
+
 ## 2. Delete leftover files
 
 Uninstalling removes the extension itself, but not the files below. Delete only what you no longer need.
