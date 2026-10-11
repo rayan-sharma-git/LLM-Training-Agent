@@ -26,24 +26,22 @@ If you are cloning the repository, the file is already there after cloning.
 
 ## 2. Prerequisites
 
-Only one thing is genuinely required:
+To install, you need only:
 
 - **VS Code 1.85.0 or newer.**
 
-That is the whole list. In particular:
+To run the extension, you also need:
+
+- **A Python 3.10 or newer interpreter** on your machine. The extension runs its bundled backend with it, and most systems already have one. If the backend fails to start, the extension says so and offers to install the missing Python packages. You can point it at a specific interpreter with the `llmTrainingAgent.pythonPath` setting.
+
+You do **not** need anything else to get started:
 
 - You do **not** need to install the repository's `requirements.txt`. That file exists
   for backend development, not for using the extension.
 - You do **not** need an API key. The default provider is **Ollama**, which runs models
   locally. An API key is only needed if you choose a hosted provider, and the
   extension tells you when it needs one.
-- You do **not** need Node.js, npm, or Python to install the extension.
-
-A Python interpreter **3.10 or newer** must be available on your machine, because the
-extension runs its bundled backend with it. Most systems already have one; if the
-backend fails to start, the extension says so and offers to install the missing Python
-packages. You can also point it at a specific interpreter with the
-`llmTrainingAgent.pythonPath` setting.
+- You do **not** need Node.js or npm.
 
 ---
 
@@ -72,14 +70,6 @@ packages. You can also point it at a specific interpreter with the
 The first run starts the bundled backend and can take a little longer than usual. If a
 notification appears, follow it — it names the actual problem.
 
-You can also confirm the install in the terminal:
-
-```bash
-code --list-extensions | grep llm-training-agent
-```
-
-This prints an identifier such as `rayansharma.llm-training-agent`.
-
 ---
 
 ## 5. First-time configuration (optional)
@@ -87,6 +77,6 @@ This prints an identifier such as `rayansharma.llm-training-agent`.
 The extension works immediately with **Ollama**, the default provider. To use a hosted
 provider instead, open the **Settings** view in the LLM Training Agent panel, choose a
 provider, enter your API key, and press **Test Connection**. See
-[USER_MANUAL.md](USER_MANUAL.md#8-configuring-an-ai-provider).
+[USER_MANUAL.md](USER_MANUAL.md#7-configuring-an-ai-provider).
 
 API keys are stored in VS Code SecretStorage, never in your project.
