@@ -26,9 +26,24 @@ describe('settings backend startup wiring', () => {
     expect(providerSrc).toContain('_ensureBackendReady');
   });
 
-  it('starts the backend before every settings API call', () => {
+  it('saves VS Code settings before syncing with the backend', () => {
+    // updateProvider must persist the setting first so a slow/failed backend
+    // start can never surface as "Settings update failed". The backend sync
+    // afterwards is best-effort with its own warning message.
+    const handlerIndex = providerSrc.indexOf("case 'updateProvider'");
+    expect(handlerIndex).toBeGreaterThan(-1);
+    const handler = providerSrc.slice(handlerIndex, handlerIndex + 2000);
+    const settingsIndex = handler.indexOf('updateSettings');
+    const backendIndex = handler.indexOf('_ensureBackendReady');
+    const providerIndex = handler.indexOf('selectProvider');
+    expect(settingsIndex).toBeGreaterThan(-1);
+    expect(backendIndex).toBeGreaterThan(settingsIndex);
+    expect(providerIndex).toBeGreaterThan(backendIndex);
+    expect(handler).toContain('saved in settings, but the backend sync failed');
+  });
+
+  it('starts the backend before every other settings API call', () => {
     for (const api of [
-      'selectProvider',
       'setApiKey',
       'testConnection',
       'removeApiKey',
@@ -46,6 +61,19 @@ describe('settings backend startup wiring', () => {
     expect(extensionSrc).toContain(
       'new SettingsWebviewProvider(context.extensionUri, apiClient, settings, ensureBackend)'
     );
+  });
+
+  it('probes multiple interpreters instead of trusting bare `python`', () => {
+    const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
+    expect(managerSrc).toContain('getPythonCandidates');
+    expect(managerSrc).toContain('missingBackendDependencies');
+    expect(managerSrc).toContain('resolvePythonCandidates');
+  });
+
+  it('handles spawn failures instead of timing out silently', () => {
+    const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
+    expect(managerSrc).toContain(".on('error'");
+    expect(managerSrc).toContain('failed to spawn');
   });
 
   it('no longer tells users to start the backend with a stale manual command', () => {

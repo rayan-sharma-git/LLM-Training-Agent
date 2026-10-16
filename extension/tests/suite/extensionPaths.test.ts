@@ -11,6 +11,8 @@ import {
   resolveBackendEntry,
   resolveBackendDir,
   resolvePythonExecutable,
+  resolvePythonCandidates,
+  pythonRunPrefix,
   resolveWorkspaceState,
   listWorkspaceRoots,
   isMultiRoot,
@@ -122,6 +124,34 @@ describe('python interpreter resolution', () => {
         platform: 'linux',
       })
     ).toBe('python3');
+  });
+
+  it('lists PATH launchers as probe candidates on Windows', () => {
+    const candidates = resolvePythonCandidates({
+      extensionPath: INSTALL_DIR,
+      exists: existsIn([]),
+      platform: 'win32',
+    });
+    // `py` first (Windows launcher finds a real Python 3), then bare names.
+    expect(candidates).toEqual(['py', 'python', 'python3']);
+  });
+
+  it('keeps the configured interpreter first in the candidate list', () => {
+    const candidates = resolvePythonCandidates({
+      extensionPath: INSTALL_DIR,
+      configuredPath: 'C:\\Python312\\python.exe',
+      exists: existsIn([]),
+      platform: 'win32',
+    });
+    expect(candidates[0]).toBe('C:\\Python312\\python.exe');
+    expect(candidates).toContain('py');
+  });
+
+  it('adds the -3 prefix only for the py launcher', () => {
+    expect(pythonRunPrefix('py')).toEqual(['-3']);
+    expect(pythonRunPrefix('C:\\Windows\\py.exe')).toEqual(['-3']);
+    expect(pythonRunPrefix('python')).toEqual([]);
+    expect(pythonRunPrefix('C:\\Python314\\python.exe')).toEqual([]);
   });
 });
 

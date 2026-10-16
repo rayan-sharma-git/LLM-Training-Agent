@@ -24,7 +24,9 @@ import * as fs from 'fs';
 import { spawn, ChildProcess, execFileSync } from 'child_process';
 import {
   resolveBackendEntry,
+  resolvePythonCandidates,
   resolvePythonExecutable,
+  pythonRunPrefix,
   listWorkspaceRoots,
   publishAllowedRoots,
   ALLOWED_ROOTS_FILE,
@@ -89,6 +91,26 @@ export class BackendManager {
       .getConfiguration('llmTrainingAgent')
       .get<string>('pythonPath', '');
     return resolvePythonExecutable({
+      extensionPath: this.context.extensionUri.fsPath,
+      configuredPath: configured,
+      exists: fs.existsSync,
+      platform: process.platform,
+    });
+  }
+
+  /**
+   * Ordered interpreter candidates actually probed at startup.
+   *
+   * `getPythonExecutable()` cannot verify PATH launchers with `existsSync`,
+   * so startup probes each candidate by running it: the first interpreter
+   * whose dependencies import wins. The resolved value is logged so the
+   * Backend output channel always shows which Python was used.
+   */
+  getPythonCandidates(): string[] {
+    const configured = vscode.workspace
+      .getConfiguration('llmTrainingAgent')
+      .get<string>('pythonPath', '');
+    return resolvePythonCandidates({
       extensionPath: this.context.extensionUri.fsPath,
       configuredPath: configured,
       exists: fs.existsSync,
@@ -186,13 +208,47 @@ export class BackendManager {
     }
 
     const backendDir = path.dirname(backendEntry);
-    const pythonExe = this.getPythonExecutable();
+    // Probe every interpreter candidate in order: the first one whose
+    // dependencies import is used. This is what fixes "Settings update
+    // failed" on machines where bare `python` resolves to a stub or to an
+    // interpreter without the backend packages (system Python 3.14 here,
+    // working venv310 elsewhere).
+    const candidates = this.getPythonCandidates();
+    let pythonExe: string | null = null;
+    let missingSummary = '';
+    const probed: string[] = [];
 
     this.log(`Extension install dir : ${this.context.extensionUri.fsPath}`);
     this.log(`Backend entry point   : ${backendEntry}`);
-    this.log(`Python interpreter    : ${pythonExe}`);
+    this.log(`Python candidates     : ${candidates.join(', ') || '(none)'}`);
 
-    if (!this.backendDependenciesAvailable(pythonExe, backendDir)) {
+    for (const candidate of candidates) {
+      probed.push(candidate);
+      const missing = this.missingBackendDependencies(candidate, backendDir);
+      if (missing === null) {
+        this.log(`Python interpreter    : ${candidate} (skipped: could not be started)`);
+        continue;
+      }
+      if (missing.length === 0) {
+        pythonExe = candidate;
+        this.log(`Python interpreter    : ${candidate}`);
+        break;
+      }
+      missingSummary = missing.join(', ');
+      this.log(`Python interpreter    : ${candidate} (missing: ${missingSummary})`);
+    }
+
+    if (!pythonExe) {
+      const tried = probed.join(', ') || '(none)';
+      this.log(`No usable Python interpreter found. Tried: ${tried}.`);
+      vscode.window.showWarningMessage(
+        'LLM Training Agent: no Python interpreter with the backend dependencies was found. ' +
+          `Tried: ${tried}. Install them with "<python>" -m pip install -r ` +
+          `"${path.join(backendDir, 'requirements.txt')}", or point ` +
+          '"llmTrainingAgent.pythonPath" at a suitable interpreter ' +
+          (missingSummary ? `(missing: ${missingSummary}). ` : '. ') +
+          'See the "LLM Training Agent: Backend" output channel for details.'
+      );
       this.cleanupProcess();
       return false;
     }
@@ -211,17 +267,19 @@ export class BackendManager {
     });
 
     try {
-      this.log(`Starting backend: ${pythonExe} -m uvicorn main:app`);
+      const port = new URL(this.backendUrl).port || '8000';
+      this.log(`Starting backend: ${pythonExe} -m uvicorn main:app (port ${port})`);
       this.backendProcess = spawn(
         pythonExe,
         [
+          ...pythonRunPrefix(pythonExe),
           '-m',
           'uvicorn',
           'main:app',
           '--host',
           '127.0.0.1',
           '--port',
-          new URL(this.backendUrl).port || '8000',
+          port,
           '--no-server-header',
         ],
         {
@@ -250,9 +308,35 @@ export class BackendManager {
         this.log(`[stderr] ${stripAnsi(data.toString()).trimEnd()}`);
       });
 
+      // Ensure the global-storage directory exists before uvicorn opens the
+      // database file there; the first run after install has no directory yet.
+      try {
+        fs.mkdirSync(this.context.globalStorageUri.fsPath, { recursive: true });
+      } catch (error) {
+        this.log(
+          `Could not create global storage dir: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+
+      this.backendProcess.on('error', (error) => {
+        // spawn() itself failed (e.g. ENOENT for a PATH launcher). Without
+        // this handler the error is unhandled and the health poll just times
+        // out with a misleading message.
+        this.log(`Backend process failed to spawn: ${error.message}`);
+        this.backendProcess = null;
+        this.resolveReady?.();
+        this.resolveReady = null;
+      });
+
       this.backendProcess.on('exit', (code) => {
         this.log(`Backend process exited with code ${code}`);
         this.backendProcess = null;
+        // Wake the waiter so an instant crash fails fast instead of waiting
+        // out the full 30 s timeout.
+        this.resolveReady?.();
+        this.resolveReady = null;
       });
 
       this.startHealthPolling();
@@ -308,9 +392,73 @@ export class BackendManager {
   }
 
   /**
-   * Read-only dependency probe so a backend with missing dependencies fails
-   * fast with an actionable message instead of a silent crash loop.
-   * This never installs or modifies anything.
+   * Import names probed to decide whether an interpreter can run the backend.
+   * Kept in sync with the runtime half of `backend/requirements.txt`.
+   * `greenlet` is included because SQLAlchemy asyncio needs it (it was the
+   * actual missing piece on a fresh system Python).
+   */
+  private static readonly BACKEND_IMPORTS = [
+    'fastapi',
+    'uvicorn',
+    'pydantic',
+    'pydantic_settings',
+    'sqlalchemy',
+    'greenlet',
+    'aiosqlite',
+    'httpx',
+    'dotenv',
+  ];
+
+  /**
+   * Missing backend imports for *pythonExe*.
+   *
+   * Returns `[]` when the interpreter can run the backend, the list of
+   * missing import names when it starts but lacks packages, and `null` when
+   * the interpreter itself could not be started (ENOENT, Store stub, ...).
+   * Never installs or modifies anything.
+   */
+  private missingBackendDependencies(pythonExe: string, backendDir: string): string[] | null {
+    try {
+      execFileSync(
+        pythonExe,
+        [...pythonRunPrefix(pythonExe), '-c', 'import fastapi, uvicorn, pydantic, pydantic_settings, sqlalchemy, greenlet, aiosqlite, httpx, dotenv'],
+        { cwd: backendDir, stdio: ['ignore', 'pipe', 'pipe'], timeout: 20_000 }
+      );
+      return [];
+    } catch (error) {
+      const err = error as { status?: number | null; message?: string } | null;
+      // execFileSync throws on non-zero exit (missing package) AND on spawn
+      // failure (ENOENT). Only a numeric exit status means "interpreter ran".
+      if (err && typeof err.status === 'number') {
+        return this.probeMissingImports(pythonExe, backendDir);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      this.log(`Interpreter probe failed for "${pythonExe}": ${message}`);
+      return null;
+    }
+  }
+
+  /** Per-import probe used to name exactly which packages are missing. */
+  private probeMissingImports(pythonExe: string, backendDir: string): string[] {
+    const missing: string[] = [];
+    for (const mod of BackendManager.BACKEND_IMPORTS) {
+      try {
+        execFileSync(pythonExe, [...pythonRunPrefix(pythonExe), '-c', `import ${mod}`], {
+          cwd: backendDir,
+          stdio: 'ignore',
+          timeout: 20_000,
+        });
+      } catch {
+        missing.push(mod);
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * Legacy single-interpreter probe, kept for callers that already resolved
+   * an interpreter (Analyze flow). Prefers the multi-candidate probing in
+   * `start()` for fresh launches.
    */
   private backendDependenciesAvailable(pythonExe: string, backendDir: string): boolean {
     try {

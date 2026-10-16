@@ -110,9 +110,14 @@ export function buildManualCommand(pythonExe: string, requirementsTxtPath: strin
  */
 function runPythonImportCheck(pythonExe: string, cwd: string, snippet: string): Promise<boolean> {
   return new Promise((resolve) => {
+    const prefix =
+      path.basename(pythonExe).toLowerCase() === 'py' ||
+      path.basename(pythonExe).toLowerCase() === 'py.exe'
+        ? ['-3']
+        : [];
     execFile(
       pythonExe,
-      ['-c', snippet],
+      [...prefix, '-c', snippet],
       { cwd, timeout: 60000 },
       (error) => {
         resolve(!error);
@@ -140,7 +145,12 @@ export function installDependencies(options: {
   outputChannel.appendLine(`Installing dependencies from ${requirementsTxtPath} ...`);
   outputChannel.show(true);
 
-  const args = ['-m', 'pip', 'install', '-r', requirementsTxtPath];
+  const pipPrefix =
+    path.basename(pythonExe).toLowerCase() === 'py' ||
+    path.basename(pythonExe).toLowerCase() === 'py.exe'
+      ? ['-3']
+      : [];
+  const args = [...pipPrefix, '-m', 'pip', 'install', '-r', requirementsTxtPath];
   const child = spawn(pythonExe, args, {
     cwd: backendDir,
     stdio: ['ignore', 'pipe', 'pipe'],

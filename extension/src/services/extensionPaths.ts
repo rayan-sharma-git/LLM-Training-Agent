@@ -95,6 +95,67 @@ export function resolvePythonExecutable(options: {
   return platform === 'win32' ? 'python' : 'python3';
 }
 
+/**
+ * Ordered Python interpreter candidates, *without* probing.
+ *
+ * Order:
+ *   1. The `llmTrainingAgent.pythonPath` setting (user-level, global).
+ *   2. A Python interpreter bundled *inside the extension*.
+ *   3. Well-known launchers on PATH (`py` / `python` / `python3`).
+ *
+ * PATH entries are returned even though they may not exist: the caller probes
+ * each candidate by actually running it, because `existsSync` cannot check
+ * PATH. There is deliberately no search of `..`, of the repository root, or of
+ * the open workspace.
+ */
+export function resolvePythonCandidates(options: {
+  extensionPath: string;
+  configuredPath?: string;
+  exists: ExistsSync;
+  platform: NodeJS.Platform;
+}): string[] {
+  const { extensionPath, configuredPath, exists, platform } = options;
+  const candidates: string[] = [];
+
+  const configured = configuredPath?.trim();
+  if (configured) {
+    candidates.push(configured);
+  }
+
+  for (const relative of bundledPythonCandidates(platform)) {
+    const candidate = path.join(extensionPath, 'python', relative);
+    if (exists(candidate) && !candidates.includes(candidate)) {
+      candidates.push(candidate);
+    }
+  }
+
+  // Well-known launchers resolved through PATH. `py` (the Windows Python
+  // launcher) comes first on win32 because bare `python` frequently resolves
+  // to the Microsoft Store stub or to an interpreter without the backend
+  // dependencies installed.
+  const pathLaunchers = platform === 'win32' ? ['py', 'python', 'python3'] : ['python3', 'python'];
+  for (const launcher of pathLaunchers) {
+    if (!candidates.includes(launcher)) {
+      candidates.push(launcher);
+    }
+  }
+
+  return candidates;
+}
+
+/**
+ * Extra argv prefix needed to run Python code with a PATH launcher.
+ *
+ * The Windows `py` launcher needs `-3` so `py -c ...` becomes
+ * `py -3 -c ...`. Every other executable runs code directly.
+ */
+export function pythonRunPrefix(pythonExe: string): string[] {
+  return path.basename(pythonExe).toLowerCase() === 'py' ||
+    path.basename(pythonExe).toLowerCase() === 'py.exe'
+    ? ['-3']
+    : [];
+}
+
 /** Result of inspecting the current workspace. */
 export type WorkspaceState =
   | { kind: 'none'; folders: [] }

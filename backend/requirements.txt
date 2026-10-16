@@ -22,7 +22,11 @@ python-dotenv==1.0.0
 tomli>=1.2.3; python_version < "3.11"
 
 # --- Persistence (SQLite via async SQLAlchemy) ---
-sqlalchemy==2.0.23
+# Floor, not pin: SQLAlchemy 2.0.23 breaks on Python 3.13/3.14 (AssertionError
+# in SQLCoreOperations via typing changes), so newer interpreters need
+# >= 2.0.30. Python 3.10 (venv310) keeps working with any 2.0.x.
+sqlalchemy>=2.0.30
+greenlet>=3.0.0
 aiosqlite==0.19.0
 
 # --- HTTP client (LLM provider REST calls) ---

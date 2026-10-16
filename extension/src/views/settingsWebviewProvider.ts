@@ -68,15 +68,22 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               const { provider, model } = message;
               if (typeof provider !== 'string' || typeof model !== 'string') return;
               if (provider.length > 64 || model.length > 255) return;
-              await this._ensureBackendReady();
+              // Save the VS Code setting FIRST so it can never be blocked by a
+              // backend that is still starting (or that fails to start). The
+              // backend sync below is then best-effort with its own message.
               await this._settings.updateSettings({ provider, model });
+              this._updateUI();
               try {
+                await this._ensureBackendReady();
                 await this._apiClient.selectProvider(provider, model);
               } catch (error) {
                 // The VS Code setting is already saved; still surface the
                 // backend failure so the mismatch is visible, then refresh.
                 this._updateUI();
-                throw error;
+                vscode.window.showWarningMessage(
+                  `Provider "${provider}" saved in settings, but the backend sync failed: ${formatError(error)}`
+                );
+                return;
               }
               this._updateUI();
               break;
