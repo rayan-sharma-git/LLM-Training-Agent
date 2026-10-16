@@ -49,23 +49,21 @@ If you changed anything that ends up inside the VSIX, rebuild and re-audit it:
 ```bash
 cd extension
 npm run package
-python scripts/verify_vsix.py llm-training-agent-1.0.0.vsix
+npm run verify:vsix
 ```
 
 Both commands must pass. The audit script exits non-zero if the package would ship
 secrets, caches, test files, or repository-relative path assumptions.
 
-`npm run package` writes the VSIX into `extension/`. The released copy that users
-download lives at the **repository root**, so after verifying, promote it:
-
-```bash
-# from the repository root
-cp extension/llm-training-agent-1.0.0.vsix ./llm-training-agent-1.0.0.vsix
-rm extension/llm-training-agent-1.0.0.vsix
-```
+`npm run package` builds the VSIX in `extension/` and then automatically promotes
+it to the **repository root** via the `postpackage` hook
+(`scripts/promote-vsix.js`), which copies the fresh file to
+`llm-training-agent-1.0.0.vsix` and removes the build-directory copy.
 
 Keep exactly one copy: the root one. `extension/*.vsix` is git-ignored precisely
-because it is a build-directory artifact.
+because it is a transient build artifact — never commit it, and never hand-copy
+it. If a stale `extension/*.vsix` is lying around on disk, the next
+`npm run package` replaces it and re-promotes the root copy.
 
 ## Update the documentation
 

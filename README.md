@@ -68,7 +68,7 @@ Workspace-only reads with traversal defence (`backend/core/security.py`); loopba
 
 ### Packaging and distribution
 
-`npm run package` produces `llm-training-agent-1.0.0.vsix`; the released copy lives at the repository root (the `extension/*.vsix` build copy is git-ignored). Rebuild and re-audit whenever VSIX contents change (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+`npm run package` (in `extension/`) rebuilds the distributable from latest source and auto-promotes it to the repository-root `llm-training-agent-1.0.0.vsix` via the `postpackage` hook; the `extension/*.vsix` build copy is git-ignored and deleted on every build. Rebuild and re-audit (`npm run verify:vsix`) whenever VSIX contents change (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ### Development setup
 

@@ -200,6 +200,8 @@
     "prelaunch": "npm run package:backend && npm run compile",
     "prepackage": "npm run package:backend && npm run compile",
     "package": "vsce package",
+    "postpackage": "node scripts/promote-vsix.js",
+    "verify:vsix": "python scripts/verify_vsix.py ../llm-training-agent-1.0.0.vsix",
     "verify:wiring": "npm run compile && node scripts/verify-webview-wiring.js",
     "lint": "tsc --noEmit -p ./"
   },
