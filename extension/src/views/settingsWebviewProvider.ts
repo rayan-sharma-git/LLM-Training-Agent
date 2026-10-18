@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ApiClient } from '../services/apiClient';
 import { SettingsManager } from '../services/settings';
-import { formatError } from '../utils';
+import { escapeJsString, formatError } from '../utils';
 import { SETTINGS_VIEW_ID } from './viewIds';
 
 export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
@@ -425,8 +425,8 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
   <script>
     const vscode = acquireVsCodeApi();
 
-    let currentProvider = '${activeProvider}';
-    let currentModel = '${activeModel}';
+    let currentProvider = '${escapeJsString(activeProvider)}';
+    let currentModel = '${escapeJsString(activeModel)}';
     const providerStates = ${JSON.stringify(providerStates)};
 
     const providerDescriptions = {
@@ -480,7 +480,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       const modelContainer = document.getElementById('modelContainer');
       modelContainer.innerHTML = '';
       const models = staticModels[currentProvider] || [];
-      const currentModelFromSettings = '${activeModel}';
+      const currentModelFromSettings = '${escapeJsString(activeModel)}';
 
       // If no static models and not ollama/compatible, allow free-text
       if (models.length === 0 || isOllama || isOpenAICompat) {
@@ -508,7 +508,10 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       const existing = document.getElementById('modelInput');
       if (existing) return existing.value;
       const select = document.getElementById('modelSelect');
-      return select.value || '${activeModel}';
+      // The select only exists when a static list was rendered; otherwise the
+      // input branch above already returned. Fall back to the escaped default.
+      if (!select) return '${escapeJsString(activeModel)}';
+      return select.value || '${escapeJsString(activeModel)}';
     }
 
     function getApiKey() {

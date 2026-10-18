@@ -13,6 +13,29 @@ export function formatError(error: unknown): string {
 }
 
 /**
+ * Escape an arbitrary string for interpolation into a single-quoted JavaScript
+ * string literal inside a webview's inline `<script>` block.
+ *
+ * The settings/chat providers build their webview HTML as a template literal
+ * and embed user-controlled values (provider id, model name) directly into
+ * the inline script. Without escaping, a value containing `'`, a newline, a
+ * backslash, or `</script>` terminates the string literal (or the script
+ * element itself) and the ENTIRE inline script fails to parse — leaving every
+ * button in the view unwired with no visible error. This helper makes such
+ * interpolation safe.
+ */
+export function escapeJsString(value: string): string {
+  return value
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r')
+    .replace(/</g, '\\x3c')
+    .replace(/>/g, '\\x3e')
+    .replace(/`/g, '\\x60');
+}
+
+/**
  * Generates an HTML representation of a report for the webview.
  */
 export function generateReportHtml(report: unknown): string {
