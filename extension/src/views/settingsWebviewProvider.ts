@@ -56,7 +56,8 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     // Initial render with current settings.
     this._updateUI();
 
-    // Handle messages from the webview.
+    // Handle messages from the webview. Command names (never key material)
+    // are logged on failure so "clicking Save does nothing" is diagnosable.
     webviewView.webview.onDidReceiveMessage(
       async (message) => {
         if (!message || typeof message !== 'object' || typeof message.command !== 'string') {
@@ -71,21 +72,27 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               // Save the VS Code setting FIRST so it can never be blocked by a
               // backend that is still starting (or that fails to start). The
               // backend sync below is then best-effort with its own message.
+              // Never re-render the whole view here: replacing `webview.html`
+              // destroys the DOM (including a just-typed API key) which is why
+              // "Save clears the key field". Status goes back via postMessage.
               await this._settings.updateSettings({ provider, model });
-              this._updateUI();
+              this._postStatus(`Provider "${provider}" saved. Syncing with backend…`, false);
               try {
                 await this._ensureBackendReady();
                 await this._apiClient.selectProvider(provider, model);
+                this._postStatus(`Provider "${provider}" saved and synced.`, false);
               } catch (error) {
                 // The VS Code setting is already saved; still surface the
-                // backend failure so the mismatch is visible, then refresh.
-                this._updateUI();
+                // backend failure so the mismatch is visible.
+                this._postStatus(
+                  `Provider "${provider}" saved in settings, but the backend sync failed: ${formatError(error)}`,
+                  true
+                );
                 vscode.window.showWarningMessage(
                   `Provider "${provider}" saved in settings, but the backend sync failed: ${formatError(error)}`
                 );
                 return;
               }
-              this._updateUI();
               break;
             }
             case 'saveApiKey': {
@@ -95,14 +102,14 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               if (apiKey && apiKey.trim()) {
                 await this._apiClient.setApiKey(provider, apiKey.trim());
                 await this._apiClient.updateConfig({ provider, apiKey: apiKey.trim() });
-                this._updateUI();
+                this._postStatus(`API key saved securely for ${provider}.`, false);
                 vscode.window.showInformationMessage(
                   `API key saved securely for ${provider}.`
                 );
               } else {
                 await this._apiClient.removeApiKey(provider);
                 await this._apiClient.removeApiKeyBackend(provider);
-                this._updateUI();
+                this._postStatus(`API key removed for ${provider}.`, false);
               }
               break;
             }
@@ -116,11 +123,12 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
                 baseUrl,
               });
               if (result.success) {
+                this._postStatus(result.message, false);
                 vscode.window.showInformationMessage(result.message);
               } else {
+                this._postStatus(result.message, true);
                 this._handleConnectionError(result);
               }
-              this._updateUI();
               break;
             }
             case 'removeApiKey': {
@@ -128,7 +136,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               await this._ensureBackendReady();
               await this._apiClient.removeApiKey(provider);
               await this._apiClient.removeApiKeyBackend(provider);
-              this._updateUI();
+              this._postStatus(`API key removed for ${provider}.`, false);
               break;
             }
             case 'refreshModels': {
@@ -138,6 +146,10 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
             }
           }
         } catch (error) {
+          console.error(
+            `Settings webview handler failed for "${message?.command ?? 'unknown'}":`,
+            error instanceof Error ? error.message : String(error)
+          );
           vscode.window.showErrorMessage(`Settings update failed: ${formatError(error)}`);
         }
       },
@@ -184,19 +196,34 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       await this._ensureBackendReady();
       const result = await this._apiClient.getProviderModels(provider);
       if (result.models.length > 0) {
+        this._postStatus(`Loaded ${result.models.length} models for ${provider}.`, false);
         vscode.window.showInformationMessage(
           `Loaded ${result.models.length} models for ${provider}.`
         );
-        this._updateUI();
       } else {
+        this._postStatus(`No models found for ${provider}. Check if the service is running and configured.`, true);
         vscode.window.showWarningMessage(
           `No models found for ${provider}. Check if the service is running and configured.`
         );
       }
     } catch (error) {
-      vscode.window.showErrorMessage(
-        `Failed to refresh models: ${formatError(error)}`
-      );
+      const message = `Failed to refresh models: ${formatError(error)}`;
+      this._postStatus(message, true);
+      vscode.window.showErrorMessage(message);
+    }
+  }
+
+  /**
+   * Send a status line into the live settings DOM without replacing
+   * `webview.html`. Re-rendering the whole view destroys form state (the
+   * "Save clears the API-key field" symptom); postMessage keeps the user's
+   * input intact while still confirming persistence.
+   */
+  private _postStatus(message: string, isError: boolean): void {
+    try {
+      void this._view?.webview.postMessage({ command: 'showStatus', text: message, isError });
+    } catch (error) {
+      console.error('Failed to post settings status:', error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -231,6 +258,7 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
 
       if (this._view) {
         this._view.webview.html = this._getHtml(
+          this._view.webview,
           activeProvider,
           activeModel,
           providerStates
@@ -242,16 +270,30 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   private _getHtml(
+    webview: vscode.Webview,
     activeProvider: string,
     activeModel: string,
     providerStates: Record<string, any>
   ): string {
+    // Same service-worker CSP contract as the chat view: VS Code bootstraps
+    // every webview through an internal worker, and `default-src 'none'`
+    // without an explicit `worker-src` fails that registration on some
+    // platforms ("The document is in an invalid state"), leaving a blank
+    // view whose buttons silently do nothing.
+    const csp =
+      `default-src 'none'; ` +
+      `script-src ${webview.cspSource} 'unsafe-inline'; ` +
+      `style-src ${webview.cspSource} 'unsafe-inline'; ` +
+      `img-src ${webview.cspSource} data: https:; ` +
+      `font-src ${webview.cspSource} data:; ` +
+      `connect-src 'none'; ` +
+      `worker-src ${webview.cspSource} blob:;`;
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>AI Provider Settings</title>
   <style>
     :root {
@@ -579,7 +621,12 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     // Called immediately: this script runs after the elements above, and a
     // DOMContentLoaded wrapper is unreliable here — the webview document may
     // already be past that point, leaving every button unwired with no error.
+    // Wrapped in try/catch with a visible fallback: if any handler fails to
+    // attach, the view reports it instead of leaving dead buttons (the
+    // "clicking Save/Analyze does nothing" symptom). Secrets are never
+    // included in the error text.
     function initSettingsUi() {
+      try {
       updateProviderUI();
 
       document.getElementById('providerSelect').addEventListener('change', function () {
@@ -596,7 +643,19 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
           setStatus('API key entered — clicking Save stores it securely.', false);
         }
       });
+      } catch (err) {
+        setStatus('Settings failed to initialize. Reload the window; details are in the extension log.', true);
+      }
     }
+
+    // Status lines posted from the extension (save/connection results) that
+    // must not destroy form state by re-rendering the whole view.
+    window.addEventListener('message', function (event) {
+      var message = event.data;
+      if (message && message.command === 'showStatus') {
+        setStatus(message.text || '', !!message.isError);
+      }
+    });
     initSettingsUi();
   </script>
 </body>

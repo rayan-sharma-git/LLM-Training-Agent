@@ -110,4 +110,73 @@ describe('webview button wiring', () => {
     expect(chatSrc).toContain("getElementById('send')");
     expect(chatSrc).toContain("getElementById('input')");
   });
+
+  it('logs webview message-handler failures instead of failing silently', () => {
+    expect(chatSrc).toContain('Chat webview handler failed');
+    expect(settingsSrc).toContain('Settings webview handler failed');
+  });
+
+  it('reports settings save results without destroying the form', () => {
+    // Full re-renders (`webview.html = ...`) after Save wiped the API-key
+    // field; status must travel via postMessage (`showStatus`) instead.
+    expect(settingsSrc).toContain("'showStatus'");
+    expect(settingsSrc).toContain('_postStatus');
+    const handlerIndex = settingsSrc.indexOf("case 'updateProvider'");
+    expect(handlerIndex).toBeGreaterThan(-1);
+    const handler = settingsSrc.slice(handlerIndex, handlerIndex + 2500);
+    expect(handler).not.toContain('this._updateUI()');
+  });
+});
+
+describe('webview service-worker CSP', () => {
+  // Root cause of "Could not register service worker: InvalidStateError":
+  // `default-src 'none'` with no `worker-src` blocks VS Code's internal
+  // webview bootstrap worker, leaving a blank view (empty console,
+  // "resource was not cached") whose buttons silently do nothing.
+  const settingsSrc = read(path.join('src', 'views', 'settingsWebviewProvider.ts'));
+  const chatSrc = read(path.join('src', 'views', 'chatWebviewProvider.ts'));
+
+  it.each([['chat', chatSrc], ['settings', settingsSrc]])(
+    'declares worker-src from the webview source in the %s view',
+    (_name, src) => {
+      expect(src as string).toContain('worker-src');
+      expect(src as string).toContain('webview.cspSource');
+    }
+  );
+
+  it('does not leave a bare default-src none without worker-src', () => {
+    for (const src of [chatSrc, settingsSrc]) {
+      expect(src).not.toContain(
+        "content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none';\""
+      );
+    }
+  });
+});
+
+describe('backend startup dependency flow', () => {
+  const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
+  const dependencySrc = read(path.join('src', 'services', 'dependencyManager.ts'));
+
+  it('verifies version + full runtime requirements before starting Python', () => {
+    expect(managerSrc).toContain('probePythonEnvironment');
+    expect(dependencySrc).toContain('MIN_PYTHON_VERSION');
+  });
+
+  it('offers a consented install exactly once per session, then re-verifies', () => {
+    expect(managerSrc).toContain('ensureRuntimeDependencies');
+    expect(managerSrc).toContain('dependencyPromptDismissed');
+    expect(dependencySrc).toContain('recheck.available');
+  });
+
+  it('never installs the root developer requirements for normal users', () => {
+    expect(dependencySrc).toContain('backend/requirements.txt');
+    // checkDependencies resolves requirements.txt next to main.py (the
+    // bundled backend dir), never the repository root.
+    expect(dependencySrc).toContain("path.join(backendDir, 'requirements.txt')");
+  });
+
+  it('logs spawn/exit failures to the backend output channel', () => {
+    expect(managerSrc).toContain('failed to spawn');
+    expect(managerSrc).toContain('Backend process exited with code');
+  });
 });

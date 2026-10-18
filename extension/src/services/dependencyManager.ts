@@ -1,10 +1,11 @@
 /**
  * DependencyManager — checks whether the Python backend dependencies listed in
- * `backend/requirements.txt` are available in the resolved Python environment.
+ * `backend/requirements.txt` are available in the resolved Python environment,
+ * and installs them (only after explicit user consent) when they are missing.
  *
- * This service ONLY *checks* the environment. It never installs, downloads, or
- * modifies anything. Any installation is performed by the caller only after the
- * user has explicitly granted permission.
+ * The install step streams pip output to the backend channel, reports
+ * interrupted installs / missing interpreters / network failures distinctly,
+ * and re-checks imports afterwards instead of assuming success.
  */
 import * as path from 'path';
 import * as fs from 'fs';
@@ -126,10 +127,24 @@ function runPythonImportCheck(pythonExe: string, cwd: string, snippet: string): 
   });
 }
 
+export interface DependencyFlowCallbacks {
+  showPrompt: (
+    message: string,
+    options: { modal: boolean },
+    ...items: string[]
+  ) => Promise<string | undefined> | Thenable<string | undefined>;
+  withProgress: (title: string, fn: () => Promise<boolean>) => Promise<boolean> | Thenable<boolean>;
+}
+
+/** Minimum Python version the bundled backend supports. */
+export const MIN_PYTHON_VERSION: readonly [number, number] = [3, 10];
+
 /**
  * Install the dependencies listed in `requirementsTxtPath` using the resolved
  * Python interpreter's pip. This MODIFIES the environment and MUST ONLY be
- * called after the user has explicitly granted permission.
+ * called after the user has explicitly granted permission (see
+ * `ensureRuntimeDependencies` below). Only ever called with the bundled
+ * `backend/requirements.txt` — never the root developer requirements.
  *
  * Streams output to an output channel so the user can see progress.
  */
@@ -287,4 +302,186 @@ export async function checkDependencies(
     message,
     manualCommand,
   };
+}
+
+/** Outcome of probing one Python interpreter for backend readiness. */
+export type PythonProbeResult =
+  | { status: 'ready'; version: string }
+  | { status: 'no-interpreter'; detail: string }
+  | { status: 'unsupported-version'; version: string }
+  | { status: 'missing-deps'; check: DependencyCheckResult };
+
+/**
+ * Probe one interpreter: spawnable, version >= 3.10, and able to import
+ * every package from the bundled backend/requirements.txt.
+ */
+export function probePythonEnvironment(options: {
+  pythonExe: string;
+  backendMainPath: string;
+}): Promise<PythonProbeResult> {
+  const { pythonExe, backendMainPath } = options;
+  const backendDir = path.dirname(backendMainPath);
+  const base = path.basename(pythonExe).toLowerCase();
+  const prefix = base === 'py' || base === 'py.exe' ? ['-3'] : [];
+  return new Promise((resolve) => {
+    execFile(
+      pythonExe,
+      [...prefix, '-c', 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")'],
+      { cwd: backendDir, timeout: 20000 },
+      (error, stdout) => {
+        if (error) {
+          resolve({ status: 'no-interpreter', detail: `Could not run "${pythonExe}".` });
+          return;
+        }
+        const version = String(stdout).trim();
+        const nums = version.split('.').map((n) => parseInt(n, 10));
+        const major = nums[0] ?? 0;
+        const minor = nums[1] ?? 0;
+        if (major < MIN_PYTHON_VERSION[0] || (major === MIN_PYTHON_VERSION[0] && minor < MIN_PYTHON_VERSION[1])) {
+          resolve({ status: 'unsupported-version', version });
+          return;
+        }
+        void checkDependencies({ pythonExe, backendMainPath }).then((check) => {
+          if (check.available) {
+            resolve({ status: 'ready', version });
+          } else {
+            resolve({ status: 'missing-deps', check });
+          }
+        });
+      }
+    );
+  });
+}
+
+/** Run pip install for the bundled runtime requirements (consent required). */
+function runPipInstall(options: {
+  pythonExe: string;
+  requirementsTxtPath: string;
+  backendDir: string;
+  outputChannel: vscode.OutputChannel;
+}): Promise<boolean> {
+  const { pythonExe, requirementsTxtPath, backendDir, outputChannel } = options;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (!settled) {
+        settled = true;
+        resolve(ok);
+      }
+    };
+    try {
+      const child = installDependencies({
+        pythonExe,
+        requirementsTxtPath,
+        backendDir,
+        outputChannel,
+        onDone: (success, error) => {
+          if (!success) {
+            outputChannel.appendLine(`Dependency installation failed: ${error ?? 'unknown error'}.`);
+          }
+          done(success);
+        },
+      });
+      child.on('error', (err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        outputChannel.appendLine(`Dependency installation could not start (${msg}).`);
+        done(false);
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      outputChannel.appendLine(`Dependency installation could not start (${msg}).`);
+      done(false);
+    }
+  });
+}
+
+/**
+ * Ensure runtime deps are present, installing them after explicit consent.
+ * Only the bundled backend/requirements.txt is ever installed — never the
+ * root developer requirements. Re-checks imports after install; handles
+ * missing interpreters, old Pythons, pip/network failures, and interrupted
+ * installs with distinct actionable messages plus the manual fallback.
+ */
+export async function ensureRuntimeDependencies(options: {
+  pythonExe: string;
+  backendMainPath: string;
+  outputChannel: vscode.OutputChannel;
+  callbacks: DependencyFlowCallbacks;
+}): Promise<boolean> {
+  const { pythonExe, backendMainPath, outputChannel, callbacks } = options;
+  const probe = await probePythonEnvironment({ pythonExe, backendMainPath });
+  if (probe.status === 'ready') {
+    return true;
+  }
+  if (probe.status === 'no-interpreter') {
+    outputChannel.appendLine(`Backend setup failed: ${probe.detail}`);
+    outputChannel.show(true);
+    const pick = await callbacks.showPrompt(
+      'LLM Training Agent: no compatible Python interpreter was found. Install Python 3.10 or newer, then retry.',
+      { modal: false },
+      'Open Python Download Page',
+      'Cancel'
+    );
+    if (pick === 'Open Python Download Page') {
+      void vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/'));
+    }
+    return false;
+  }
+  if (probe.status === 'unsupported-version') {
+    outputChannel.appendLine(`Backend setup failed: Python ${probe.version} is too old (need 3.10+).`);
+    outputChannel.show(true);
+    await callbacks.showPrompt(
+      `LLM Training Agent: Python ${probe.version} is too old — 3.10+ is required.`,
+      { modal: false },
+      'OK'
+    );
+    return false;
+  }
+  const check = probe.check;
+  if (!check.requirementsTxtPath) {
+    outputChannel.appendLine(`Backend setup failed: ${check.message}`);
+    outputChannel.show(true);
+    await callbacks.showPrompt(
+      `LLM Training Agent: ${check.message} Reinstall the extension.`,
+      { modal: false },
+      'OK'
+    );
+    return false;
+  }
+  const backendDir = path.dirname(backendMainPath);
+  const manualCommand = check.manualCommand;
+  const missingList = check.missing.length > 0 ? check.missing.join(', ') : 'required packages';
+  outputChannel.appendLine(`Backend setup: ${check.message}`);
+  const pick = await callbacks.showPrompt(
+    `LLM Training Agent: backend needs packages (${missingList}). Install now?`,
+    { modal: false },
+    'Install Dependencies',
+    'Show Manual Command',
+    'Cancel'
+  );
+  if (pick === 'Show Manual Command') {
+    outputChannel.appendLine(`Manual install command: ${manualCommand}`);
+    outputChannel.show(true);
+    return false;
+  }
+  if (pick !== 'Install Dependencies') {
+    return false;
+  }
+  const installed = await callbacks.withProgress(
+    'Installing backend dependencies...',
+    () => runPipInstall({ pythonExe, requirementsTxtPath: check.requirementsTxtPath as string, backendDir, outputChannel })
+  );
+  if (!installed) {
+    outputChannel.appendLine(`Install failed. Retry, or run manually: ${manualCommand}`);
+    outputChannel.show(true);
+    return false;
+  }
+  const recheck = await checkDependencies({ pythonExe, backendMainPath });
+  if (recheck.available) {
+    outputChannel.appendLine('Backend setup: all runtime dependencies verified after install.');
+    return true;
+  }
+  outputChannel.appendLine(`Still missing after install. Run manually: ${recheck.manualCommand || manualCommand}`);
+  outputChannel.show(true);
+  return false;
 }

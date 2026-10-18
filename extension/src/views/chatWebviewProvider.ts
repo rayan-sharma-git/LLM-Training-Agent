@@ -56,9 +56,12 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtml(webviewView.webview);
 
-    // Handle messages coming from the webview.
+    // Handle messages coming from the webview. Failures are logged (without
+    // message contents, which may contain keys) so a dead handler cannot
+    // hide as "clicking Send does nothing" with an empty console.
     webviewView.webview.onDidReceiveMessage(
       async (message) => {
+        try {
         if (!message || typeof message !== 'object' || typeof message.command !== 'string') {
           return;
         }
@@ -86,6 +89,12 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
             }
             break;
           }
+        }
+        } catch (error) {
+          console.error(
+            `Chat webview handler failed for "${message?.command ?? 'unknown'}":`,
+            error instanceof Error ? error.message : String(error)
+          );
         }
       },
       null,
@@ -198,12 +207,30 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   private _getHtml(webview: vscode.Webview): string {
+    // VS Code serves every webview through an internal service worker. A CSP
+    // of `default-src 'none'` with no explicit `worker-src` makes that
+    // registration fail on some platforms with:
+    //   "Could not register service worker: InvalidStateError:
+    //    The document is in an invalid state."
+    // The whole view then stays blank (empty console, "resource was not
+    // cached") and every button silently does nothing. Allowing workers from
+    // the webview's own source keeps the bootstrap alive while everything
+    // else stays locked down. `connect-src 'none'` is intentional: the UI
+    // never fetches directly; it talks to the extension via postMessage.
+    const csp =
+      `default-src 'none'; ` +
+      `script-src ${webview.cspSource} 'unsafe-inline'; ` +
+      `style-src ${webview.cspSource} 'unsafe-inline'; ` +
+      `img-src ${webview.cspSource} data: https:; ` +
+      `font-src ${webview.cspSource} data:; ` +
+      `connect-src 'none'; ` +
+      `worker-src ${webview.cspSource} blob:;`;
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none';">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Chat</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -596,7 +623,19 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     });
 
     // Tell the extension we are ready to receive restored history.
-    vscode.postMessage({ command: 'ready' });
+    // Wrapped so a missing acquireVsCodeApi (or any wiring fault) surfaces as
+    // visible text instead of a dead Send button with an empty console.
+    try {
+      vscode.postMessage({ command: 'ready' });
+    } catch (err) {
+      var host = document.getElementById('messages');
+      if (host) {
+        var banner = document.createElement('div');
+        banner.className = 'message assistant';
+        banner.textContent = 'Chat failed to initialize. Reload the window; the extension log has details.';
+        host.appendChild(banner);
+      }
+    }
     // NOTE: no DOMContentLoaded wrapper here. This script runs at the end of
     // <body>, after #input/#send exist; the webview may already be past
     // DOMContentLoaded, in which case deferred listeners never fire and the

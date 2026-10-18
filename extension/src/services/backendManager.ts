@@ -31,6 +31,10 @@ import {
   publishAllowedRoots,
   ALLOWED_ROOTS_FILE,
 } from './extensionPaths';
+import {
+  ensureRuntimeDependencies,
+  probePythonEnvironment,
+} from './dependencyManager';
 
 export interface BackendStatus {
   status: 'starting' | 'running' | 'stopped' | 'failed';
@@ -59,6 +63,8 @@ export class BackendManager {
   private readyPromise: Promise<void> | null = null;
   private startingPromise: Promise<boolean> | null = null;
   private shutdownRequested = false;
+  /** Set after the user dismisses/declines the install prompt: never nag twice. */
+  private dependencyPromptDismissed = false;
   private readonly outputChannel: vscode.OutputChannel;
 
   constructor(context: vscode.ExtensionContext) {
@@ -67,7 +73,9 @@ export class BackendManager {
   }
 
   /**
-   * Log a message to the backend output channel.
+   * Log a message to the backend output channel. API keys and other secrets
+   * must never reach this channel: callers pass only interpreter paths,
+   * package names, versions, and exit codes — never key material.
    */
   private log(message: string): void {
     this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
@@ -208,13 +216,15 @@ export class BackendManager {
     }
 
     const backendDir = path.dirname(backendEntry);
-    // Probe every interpreter candidate in order: the first one whose
-    // dependencies import is used. This is what fixes "Settings update
-    // failed" on machines where bare `python` resolves to a stub or to an
-    // interpreter without the backend packages (system Python 3.14 here,
-    // working venv310 elsewhere).
+    // Probe every interpreter candidate in order. The first fully-ready one
+    // wins immediately (no prompt, no reinstall). When none is ready but one
+    // is a working interpreter with missing packages, offer the consented
+    // auto-install ONCE per session, then re-verify instead of assuming
+    // success. The install only ever uses the bundled
+    // backend/requirements.txt — never the root developer requirements.
     const candidates = this.getPythonCandidates();
     let pythonExe: string | null = null;
+    let installCandidate: string | null = null;
     let missingSummary = '';
     const probed: string[] = [];
 
@@ -224,18 +234,51 @@ export class BackendManager {
 
     for (const candidate of candidates) {
       probed.push(candidate);
-      const missing = this.missingBackendDependencies(candidate, backendDir);
-      if (missing === null) {
+      const probe = await probePythonEnvironment({ pythonExe: candidate, backendMainPath: backendEntry });
+      if (probe.status === 'ready') {
+        pythonExe = candidate;
+        this.log(`Python interpreter    : ${candidate} (ready, Python ${probe.version})`);
+        break;
+      }
+      if (probe.status === 'no-interpreter') {
         this.log(`Python interpreter    : ${candidate} (skipped: could not be started)`);
         continue;
       }
-      if (missing.length === 0) {
-        pythonExe = candidate;
-        this.log(`Python interpreter    : ${candidate}`);
-        break;
+      if (probe.status === 'unsupported-version') {
+        this.log(`Python interpreter    : ${candidate} (skipped: Python ${probe.version} < 3.10)`);
+        continue;
       }
-      missingSummary = missing.join(', ');
+      missingSummary = probe.check.missing.join(', ') || probe.check.message;
       this.log(`Python interpreter    : ${candidate} (missing: ${missingSummary})`);
+      if (!installCandidate && probe.check.requirementsTxtPath) {
+        installCandidate = candidate;
+      }
+    }
+
+    if (!pythonExe && installCandidate && !this.dependencyPromptDismissed) {
+      const ready = await ensureRuntimeDependencies({
+        pythonExe: installCandidate,
+        backendMainPath: backendEntry,
+        outputChannel: this.outputChannel,
+        callbacks: {
+          showPrompt: (message, opts, ...items) =>
+            vscode.window.showInformationMessage(message, opts, ...items),
+          withProgress: (title, fn) =>
+            vscode.window.withProgress(
+              { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+              async () => fn()
+            ),
+        },
+      });
+      if (ready) {
+        pythonExe = installCandidate;
+        this.log(`Python interpreter    : ${pythonExe} (dependencies installed and verified)`);
+      } else {
+        // The flow already showed a specific message; remember the choice so
+        // later actions in this session fail quietly with the channel hint
+        // instead of re-prompting on every button click.
+        this.dependencyPromptDismissed = true;
+      }
     }
 
     if (!pythonExe) {
@@ -323,15 +366,16 @@ export class BackendManager {
       this.backendProcess.on('error', (error) => {
         // spawn() itself failed (e.g. ENOENT for a PATH launcher). Without
         // this handler the error is unhandled and the health poll just times
-        // out with a misleading message.
+        // out with a misleading message. The channel must not stay empty.
         this.log(`Backend process failed to spawn: ${error.message}`);
+        this.outputChannel.show(true);
         this.backendProcess = null;
         this.resolveReady?.();
         this.resolveReady = null;
       });
 
-      this.backendProcess.on('exit', (code) => {
-        this.log(`Backend process exited with code ${code}`);
+      this.backendProcess.on('exit', (code, signal) => {
+        this.log(`Backend process exited with code ${code}${signal ? ` (signal ${signal})` : ''}`);
         this.backendProcess = null;
         // Wake the waiter so an instant crash fails fast instead of waiting
         // out the full 30 s timeout.
@@ -410,7 +454,9 @@ export class BackendManager {
   ];
 
   /**
-   * Missing backend imports for *pythonExe*.
+   * Legacy low-level import probe. Startup now uses `probePythonEnvironment`
+   * (version + full bundled-requirements check with consented auto-install);
+   * this stays for unit tests and as the documented read-only helper.
    *
    * Returns `[]` when the interpreter can run the backend, the list of
    * missing import names when it starts but lacks packages, and `null` when
