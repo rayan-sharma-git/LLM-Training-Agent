@@ -134,6 +134,60 @@ describe('checkDependencies', () => {
   });
 });
 
+describe('checkDependencies with the bundled requirements checker', () => {
+  const backendMainPath = path.join('C:', 'backend', 'main.py');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockExistsSync.mockReturnValue(true);
+    mockReadFileSync.mockReturnValue('fastapi==0.104.1\ntomli>=1.2.3; python_version < "3.11"\n');
+  });
+
+  const reply = (report: Record<string, unknown>) =>
+    mockExecFile.mockImplementation(
+      (_py: string, _args: string[], _opts: unknown, cb: (err: null, stdout: string) => void) => {
+        cb(null, JSON.stringify(report));
+      }
+    );
+
+  it('runs check_requirements.py against the bundled requirements file', async () => {
+    reply({ python: '3.12.1', ok: true, checked: 1, missing: [], outdated: [], skipped: ['tomli'] });
+    const result = await checkDependencies({ pythonExe: 'python3', backendMainPath });
+    expect(result.available).toBe(true);
+    const args = mockExecFile.mock.calls[0][1] as string[];
+    expect(args[0]).toContain('check_requirements.py');
+    expect(args[1]).toContain('requirements.txt');
+    // A marker-excluded package is not demanded, so no install loop.
+    expect(result.missing).toEqual([]);
+  });
+
+  it('reports missing and too-old packages with their versions', async () => {
+    reply({
+      python: '3.13.1',
+      ok: false,
+      checked: 3,
+      missing: ['fastapi'],
+      outdated: [{ name: 'sqlalchemy', installed: '2.0.23', required: '>=2.0.30' }],
+      skipped: [],
+    });
+    const result = await checkDependencies({ pythonExe: 'python3', backendMainPath });
+    expect(result.available).toBe(false);
+    expect(result.missing).toEqual(['fastapi', 'sqlalchemy (installed 2.0.23, needs >=2.0.30)']);
+    expect(result.message).toContain('outdated');
+  });
+
+  it('falls back to the import check when the checker cannot run', async () => {
+    mockExecFile.mockImplementation(
+      (_py: string, args: string[], _opts: unknown, cb: (err: Error | null, stdout?: string) => void) => {
+        cb(String(args[0]).includes('check_requirements') ? new Error('boom') : null);
+      }
+    );
+    const result = await checkDependencies({ pythonExe: 'python3', backendMainPath });
+    expect(result.available).toBe(true);
+    expect(mockExecFile.mock.calls.length).toBeGreaterThan(1);
+  });
+});
+
 describe('probePythonEnvironment', () => {
   beforeEach(() => {
     vi.clearAllMocks();

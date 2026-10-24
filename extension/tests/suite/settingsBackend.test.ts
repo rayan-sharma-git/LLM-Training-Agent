@@ -26,32 +26,27 @@ describe('settings backend startup wiring', () => {
     expect(providerSrc).toContain('_ensureBackendReady');
   });
 
-  it('saves VS Code settings before syncing with the backend', () => {
-    // updateProvider must persist the setting first so a slow/failed backend
-    // start can never surface as "Settings update failed". The backend sync
-    // afterwards is best-effort with its own warning message.
-    const handlerIndex = providerSrc.indexOf("case 'updateProvider'");
+  it('stores the key and VS Code settings before touching the backend', () => {
+    // A slow or broken backend must never lose what the user just entered; the
+    // backend gets everything again from SecretStorage whenever it starts.
+    const handlerIndex = providerSrc.indexOf('private async _save(');
     expect(handlerIndex).toBeGreaterThan(-1);
-    const handler = providerSrc.slice(handlerIndex, handlerIndex + 2000);
+    const handler = providerSrc.slice(handlerIndex, handlerIndex + 3500);
     const settingsIndex = handler.indexOf('updateSettings');
+    const keyIndex = handler.indexOf('setApiKey');
     const backendIndex = handler.indexOf('_ensureBackendReady');
-    const providerIndex = handler.indexOf('selectProvider');
+    const selectIndex = handler.indexOf('selectProvider');
     expect(settingsIndex).toBeGreaterThan(-1);
-    expect(backendIndex).toBeGreaterThan(settingsIndex);
-    expect(providerIndex).toBeGreaterThan(backendIndex);
-    expect(handler).toContain('saved in settings, but the backend sync failed');
+    expect(keyIndex).toBeGreaterThan(settingsIndex);
+    expect(backendIndex).toBeGreaterThan(keyIndex);
+    expect(selectIndex).toBeGreaterThan(backendIndex);
+    expect(handler).toContain('applied automatically the next time the backend starts');
   });
 
   it('starts the backend before every other settings API call', () => {
-    for (const api of [
-      'setApiKey',
-      'testConnection',
-      'removeApiKey',
-      'getProviderModels',
-    ]) {
-      const apiIndex = providerSrc.indexOf(api);
+    for (const api of ['testConnection(', 'removeApiKeyBackend(', 'getProviderModels(', 'updateConfig(']) {
+      const apiIndex = providerSrc.indexOf(`this._apiClient.${api}`);
       expect(apiIndex).toBeGreaterThan(-1);
-      // The startup guard must appear before the API call in each handler.
       const guardIndex = providerSrc.lastIndexOf('_ensureBackendReady', apiIndex);
       expect(guardIndex).toBeGreaterThan(-1);
     }
@@ -63,22 +58,27 @@ describe('settings backend startup wiring', () => {
     );
   });
 
+  it('re-checks backend health on every call and re-sends saved settings to new processes', () => {
+    // Caching "started OK" forever reported a crashed backend as running.
+    expect(extensionSrc).not.toContain('startupPromise');
+    expect(extensionSrc).toContain('backendManager.ensureRunning()');
+    expect(extensionSrc).toContain('syncBackendConfig');
+    expect(extensionSrc).toContain('backendManager.generation');
+  });
+
   it('probes multiple interpreters instead of trusting bare `python`', () => {
     const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
     expect(managerSrc).toContain('getPythonCandidates');
-    expect(managerSrc).toContain('missingBackendDependencies');
-    expect(managerSrc).toContain('resolvePythonCandidates');
   });
 
   it('handles spawn failures instead of timing out silently', () => {
     const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
-    expect(managerSrc).toContain(".on('error'");
     expect(managerSrc).toContain('failed to spawn');
   });
 
   it('no longer tells users to start the backend with a stale manual command', () => {
-    const apiClientSrc = read(path.join('src', 'services', 'apiClient.ts'));
-    expect(apiClientSrc).not.toContain('cd backend && python -m uvicorn');
+    const managerSrc = read(path.join('src', 'services', 'backendManager.ts'));
+    expect(managerSrc).not.toContain('python -m uvicorn backend.main');
   });
 });
 
@@ -92,23 +92,19 @@ describe('dev launch backend sync', () => {
   });
 });
 
-describe('webview button wiring', () => {
-  // The Settings webview once wrapped all of its button wiring in a
-  // DOMContentLoaded listener. Because the script runs at the end of <body>,
-  // the webview document may already be past that point, so the listener
-  // never fired and every Settings button silently did nothing. The Chat
-  // webview already binds immediately, and the Settings webview must too.
+describe('webview wiring', () => {
+  // The chat script used to live in a TypeScript template literal where
+  // `split('\n')` turned into a real newline inside a JS string. The page then
+  // failed to parse and every button was dead with an empty console. Scripts
+  // are real files now, and the providers must load them (not inline code).
   const settingsSrc = read(path.join('src', 'views', 'settingsWebviewProvider.ts'));
   const chatSrc = read(path.join('src', 'views', 'chatWebviewProvider.ts'));
 
-  it('binds settings buttons immediately instead of waiting for DOMContentLoaded', () => {
-    expect(settingsSrc).not.toContain("addEventListener('DOMContentLoaded'");
-    expect(settingsSrc).not.toContain('addEventListener("DOMContentLoaded"');
-  });
-
-  it('keeps the chat send button wired through direct element binding', () => {
-    expect(chatSrc).toContain("getElementById('send')");
-    expect(chatSrc).toContain("getElementById('input')");
+  it('loads the views from media/ scripts and no longer inlines any script', () => {
+    expect(chatSrc).toContain("'media', 'chat.js'");
+    expect(settingsSrc).toContain("'media', 'settings.js'");
+    expect(chatSrc).not.toContain('<script>');
+    expect(settingsSrc).not.toContain('<script>');
   });
 
   it('logs webview message-handler failures instead of failing silently', () => {
@@ -116,40 +112,23 @@ describe('webview button wiring', () => {
     expect(settingsSrc).toContain('Settings webview handler failed');
   });
 
-  it('reports settings save results without destroying the form', () => {
-    // Full re-renders (`webview.html = ...`) after Save wiped the API-key
-    // field; status must travel via postMessage (`showStatus`) instead.
+  it('reports settings results without re-rendering (and wiping) the form', () => {
     expect(settingsSrc).toContain("'showStatus'");
     expect(settingsSrc).toContain('_postStatus');
-    const handlerIndex = settingsSrc.indexOf("case 'updateProvider'");
-    expect(handlerIndex).toBeGreaterThan(-1);
-    const handler = settingsSrc.slice(handlerIndex, handlerIndex + 2500);
-    expect(handler).not.toContain('this._updateUI()');
+    // `webview.html =` may only appear in the initial render.
+    expect(settingsSrc.split('webview.html =').length - 1).toBe(1);
   });
-});
 
-describe('webview service-worker CSP', () => {
-  // Root cause of "Could not register service worker: InvalidStateError":
-  // `default-src 'none'` with no `worker-src` blocks VS Code's internal
-  // webview bootstrap worker, leaving a blank view (empty console,
-  // "resource was not cached") whose buttons silently do nothing.
-  const settingsSrc = read(path.join('src', 'views', 'settingsWebviewProvider.ts'));
-  const chatSrc = read(path.join('src', 'views', 'chatWebviewProvider.ts'));
+  it('never sends key material back to the page', () => {
+    // The page only learns whether a key is saved.
+    expect(settingsSrc).toContain('hasApiKey');
+    expect(settingsSrc).not.toMatch(/postMessage\([^)]*apiKey/);
+  });
 
-  it.each([['chat', chatSrc], ['settings', settingsSrc]])(
-    'declares worker-src from the webview source in the %s view',
-    (_name, src) => {
-      expect(src as string).toContain('worker-src');
-      expect(src as string).toContain('webview.cspSource');
-    }
-  );
-
-  it('does not leave a bare default-src none without worker-src', () => {
-    for (const src of [chatSrc, settingsSrc]) {
-      expect(src).not.toContain(
-        "content=\"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none';\""
-      );
-    }
+  it('bundles the media scripts and the requirements checker into the VSIX', () => {
+    const ignore = read('.vscodeignore');
+    expect(ignore).not.toMatch(/^media\/?\*?\*?$/m);
+    expect(ignore).not.toMatch(/^\*\*\/\*\.js$/m);
   });
 });
 

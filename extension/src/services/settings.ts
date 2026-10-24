@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { DEFAULT_BASE_URLS } from './providers';
 
 export interface Settings {
   backendUrl: string;
@@ -10,6 +11,10 @@ export interface Settings {
    * from PATH". It is a machine setting, never a project setting.
    */
   pythonPath: string;
+  /** Ollama server URL (user-level). */
+  ollamaBaseUrl: string;
+  /** Base URL of the OpenAI-compatible endpoint (user-level). */
+  openaiCompatibleBaseUrl: string;
 }
 
 /**
@@ -34,6 +39,11 @@ export class SettingsManager {
       provider: config.get<string>('provider', 'ollama'),
       model: config.get<string>('model', 'llama3.2'),
       pythonPath: config.get<string>('pythonPath', ''),
+      ollamaBaseUrl: config.get<string>('ollamaBaseUrl', DEFAULT_BASE_URLS.ollama),
+      openaiCompatibleBaseUrl: config.get<string>(
+        'openaiCompatibleBaseUrl',
+        DEFAULT_BASE_URLS.openai_compatible
+      ),
     };
   }
 

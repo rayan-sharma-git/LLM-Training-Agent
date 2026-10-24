@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { SettingsManager } from './services/settings';
 import { ApiClient } from './services/apiClient';
 import { BackendManager } from './services/backendManager';
+import { syncBackendConfig } from './services/backendSync';
 import { registerAnalyzerCommands } from './commands/analyzerCommands';
 import { registerChatCommands } from './commands/chatCommands';
 import { registerChangeCommands } from './commands/changeCommands';
@@ -27,33 +28,52 @@ export async function activate(context: vscode.ExtensionContext) {
     // This keeps activation cheap and avoids spawning Python for users who
     // never invoke the agent in a given window.
     //
-    // The promise is cleared after a FAILED attempt so the next action retries
-    // instead of replaying the cached failure forever. Without the reset, a
-    // single failed start (e.g. backend still unpacking on first run) would
-    // make every button in the window fail until the user reloaded VS Code.
-    let startupPromise: Promise<boolean> | null = null;
+    // Every call re-checks health (one cheap GET) instead of caching a past
+    // success: a backend that crashed since the last click must be restarted,
+    // not reported as running. Concurrent callers share one in-flight attempt.
+    //
+    // The backend keeps API keys in memory only, so whenever it is a new
+    // process (or one this window has not configured yet) the saved provider,
+    // model, URLs and keys are pushed to it from SecretStorage/settings.
+    let inflight: Promise<boolean> | null = null;
+    let syncedGeneration = -1;
     const ensureBackend = (): Promise<boolean> => {
-      if (!startupPromise) {
-        startupPromise = backendManager.ensureRunning().then(
-          (ok) => {
+      if (!inflight) {
+        inflight = (async () => {
+          try {
+            const ok = await backendManager.ensureRunning();
             if (!ok) {
-              startupPromise = null;
               vscode.window.showWarningMessage(
                 'LLM Training Agent: the Python backend could not be started. ' +
                   'Check the "LLM Training Agent: Backend" output channel. ' +
                   'If Python dependencies are missing, run "Analyze Project" to be ' +
                   'offered the dependency install.'
               );
+              return false;
             }
-            return ok;
-          },
-          (error) => {
-            startupPromise = null;
-            throw error;
+            if (syncedGeneration !== backendManager.generation) {
+              const current = settings.getSettings();
+              const result = await syncBackendConfig(current, {
+                getApiKey: (provider) => apiClient.getApiKey(provider),
+                updateConfig: (payload) => apiClient.updateConfig(payload),
+                selectProvider: (provider, model) => apiClient.selectProvider(provider, model),
+                log: (line) => backendManager.logLine(line),
+              });
+              syncedGeneration = backendManager.generation;
+              if (!result.ok) {
+                vscode.window.showWarningMessage(
+                  `LLM Training Agent: could not apply your saved AI settings to the backend (${result.error}). ` +
+                    'Open the AI settings and press Save to retry.'
+                );
+              }
+            }
+            return true;
+          } finally {
+            inflight = null;
           }
-        );
+        })();
       }
-      return startupPromise;
+      return inflight;
     };
 
     // Register shutdown so the child process is cleaned up when VS Code closes.

@@ -187,6 +187,18 @@
           "default": "llama3.2",
           "scope": "application",
           "description": "LLM model name. User-level: it applies to every project and is never stored in a project."
+        },
+        "llmTrainingAgent.ollamaBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "scope": "application",
+          "description": "URL of the Ollama server used when the provider is \"ollama\". User-level."
+        },
+        "llmTrainingAgent.openaiCompatibleBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:1234/v1",
+          "scope": "application",
+          "description": "Base URL of the OpenAI-compatible server used when the provider is \"openai_compatible\" (for example LM Studio or vLLM). User-level."
         }
       }
     }

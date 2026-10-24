@@ -150,10 +150,11 @@ export function resolvePythonCandidates(options: {
  * `py -3 -c ...`. Every other executable runs code directly.
  */
 export function pythonRunPrefix(pythonExe: string): string[] {
-  return path.basename(pythonExe).toLowerCase() === 'py' ||
-    path.basename(pythonExe).toLowerCase() === 'py.exe'
-    ? ['-3']
-    : [];
+  // Split on both separators: `path.basename` only understands the host's own
+  // separator, so a Windows path like C:\Windows\py.exe was not recognised
+  // when this ran on Linux or macOS.
+  const base = (pythonExe.split(/[\\/]/).pop() ?? '').toLowerCase();
+  return base === 'py' || base === 'py.exe' ? ['-3'] : [];
 }
 
 /** Result of inspecting the current workspace. */

@@ -33,7 +33,7 @@ Deterministic code measures what can be measured (dataset statistics, FLOPs-base
 
 ### Technology stack
 
-- **Backend:** Python 3.10.6, FastAPI, Pydantic v2, SQLAlchemy 2 (async) over SQLite, httpx, optional `google-generativeai` / `cohere` SDKs.
+- **Backend:** Python 3.10+, FastAPI, Pydantic v2, SQLAlchemy 2 (async) over SQLite, httpx (all providers are called over REST; no provider SDKs).
 - **Extension:** TypeScript, VS Code Extension API, axios; vitest and `tsc --noEmit`.
 - **Packaging:** `vsce` builds the VSIX; `extension/scripts/sync-backend.js` bundles the backend into it.
 - **Tests:** pytest (`backend/tests/`), vitest (`extension/tests/suite/`), VSIX audit (`extension/scripts/verify_vsix.py`), isolation check (`extension/scripts/e2e_two_projects.py`).

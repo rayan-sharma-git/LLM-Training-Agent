@@ -77,6 +77,18 @@ export class BackendManager {
    * must never reach this channel: callers pass only interpreter paths,
    * package names, versions, and exit codes — never key material.
    */
+  /**
+   * Incremented every time this extension host starts a new backend process.
+   * The backend keeps API keys in memory only, so a new process means the saved
+   * configuration must be pushed again (see backendSync.ts).
+   */
+  public generation = 0;
+
+  /** Write a diagnostic line to the "LLM Training Agent: Backend" channel. */
+  public logLine(message: string): void {
+    this.log(message);
+  }
+
   private log(message: string): void {
     this.outputChannel.appendLine(`[${new Date().toISOString()}] ${message}`);
   }
@@ -399,6 +411,7 @@ export class BackendManager {
       }
 
       if (await this.checkHealth()) {
+        this.generation += 1;
         this.log('Backend is ready.');
         return true;
       }

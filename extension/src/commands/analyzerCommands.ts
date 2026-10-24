@@ -299,6 +299,9 @@ export function registerAnalyzerCommands(
             // structured report, so the user receives the full answer in a
             // single click — no follow-up questions required.
             if (chatProvider && result) {
+              // Make the result visible; if the view was never opened the
+              // message is queued and shown as soon as it loads.
+              void chatProvider.reveal().then(undefined, () => undefined);
               const analysis = result.analysis;
               if (analysis && analysis.markdown) {
                 chatProvider.postAssistantMessage(analysis.markdown);

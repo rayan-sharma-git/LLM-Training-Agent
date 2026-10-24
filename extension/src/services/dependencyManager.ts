@@ -260,7 +260,35 @@ export async function checkDependencies(
     };
   }
 
-  // Build a single import snippet so we only spawn one subprocess.
+  const manualCommand = buildManualCommand(pythonExe, requirementsTxtPath);
+
+  // Preferred: the bundled stdlib-only checker. Unlike "import every package"
+  // it honours environment markers (a `tomli; python_version < "3.11"` line
+  // must not be demanded on Python 3.12) and it notices packages that are
+  // installed but older than required, which still import fine and then fail
+  // at runtime.
+  const checker = path.join(backendDir, 'check_requirements.py');
+  if (fs.existsSync(checker)) {
+    const report = await runRequirementsChecker(pythonExe, backendDir, checker, requirementsTxtPath);
+    if (report) {
+      const problems = [
+        ...report.missing,
+        ...report.outdated.map((o) => `${o.name} (installed ${o.installed}, needs ${o.required})`),
+      ];
+      return {
+        available: report.ok,
+        missing: problems,
+        requirementsTxtPath,
+        message: report.ok
+          ? `All ${report.checked} backend dependencies are available (Python ${report.python}).`
+          : `Missing or outdated backend dependencies: ${problems.join(', ')}`,
+        manualCommand,
+      };
+    }
+    // The checker itself could not run; fall back to the import check below.
+  }
+
+  // Fallback (older bundles without the checker): a single import snippet.
   const imports = requirements.map((r) => r.importSpec).join(', ');
   const snippet = `import ${imports}`;
 
@@ -272,12 +300,11 @@ export async function checkDependencies(
       missing: [],
       requirementsTxtPath,
       message: `All ${requirements.length} backend dependencies are available.`,
-      manualCommand: buildManualCommand(pythonExe, requirementsTxtPath),
+      manualCommand,
     };
   }
 
-  // Fall back to checking each requirement individually to report exactly which
-  // ones are missing.
+  // Check each requirement individually to report exactly which are missing.
   for (const req of requirements) {
     const importOk = await runPythonImportCheck(pythonExe, backendDir, `import ${req.importSpec}`);
     if (!importOk) {
@@ -290,18 +317,57 @@ export async function checkDependencies(
     missing.push(...requirements.map((r) => r.importSpec));
   }
 
-  const manualCommand = buildManualCommand(pythonExe, requirementsTxtPath);
-  const message = missing.length > 0
-    ? `Missing backend dependencies: ${missing.join(', ')}`
-    : `Backend dependencies are not all importable (requirements: ${requirements.length}).`;
+  const message = `Missing backend dependencies: ${missing.join(', ')}`;
 
   return {
-    available: missing.length === 0,
+    available: false,
     missing,
     requirementsTxtPath,
     message,
     manualCommand,
   };
+}
+
+interface RequirementsReport {
+  python: string;
+  ok: boolean;
+  checked: number;
+  missing: string[];
+  outdated: Array<{ name: string; installed: string; required: string }>;
+}
+
+/** Run backend/check_requirements.py; null when it cannot run or prints junk. */
+function runRequirementsChecker(
+  pythonExe: string,
+  cwd: string,
+  checker: string,
+  requirementsTxtPath: string
+): Promise<RequirementsReport | null> {
+  const base = path.basename(pythonExe).toLowerCase();
+  const prefix = base === 'py' || base === 'py.exe' ? ['-3'] : [];
+  return new Promise((resolve) => {
+    execFile(
+      pythonExe,
+      [...prefix, checker, requirementsTxtPath],
+      { cwd, timeout: 60000 },
+      (error, stdout) => {
+        if (error) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(String(stdout)) as RequirementsReport;
+          if (typeof parsed.ok !== 'boolean' || !Array.isArray(parsed.missing) || !Array.isArray(parsed.outdated)) {
+            resolve(null);
+            return;
+          }
+          resolve(parsed);
+        } catch {
+          resolve(null);
+        }
+      }
+    );
+  });
 }
 
 /** Outcome of probing one Python interpreter for backend readiness. */

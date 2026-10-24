@@ -39,12 +39,9 @@ aiosqlite==0.19.0
 # analyzer falls back to regex extraction, which is less accurate.
 PyYAML==6.0.3
 
-# --- HTTP client (LLM provider REST calls) ---
+# --- HTTP client (every LLM provider, including Gemini and Cohere, is called
+# over plain REST with httpx; no provider SDK is imported anywhere) ---
 httpx==0.25.2
-
-# --- Optional provider SDKs (Gemini / Cohere) ---
-google-generativeai==0.7.2
-cohere>=5.9.0,<5.11.0
 
 # --- Tests & code quality (development only) ---
 pytest==7.4.3

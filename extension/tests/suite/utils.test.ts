@@ -59,29 +59,3 @@ describe('escapeJsString', () => {
     }
   });
 });
-
-describe('settings webview escaping', () => {
-  // Regression guard: the settings webview once interpolated the provider and
-  // model names into its inline <script> with no escaping, so a value like
-  // `o'brien` produced `let currentModel = 'o'brien';` — the whole script
-  // failed to parse and every Settings button silently did nothing.
-  const providerSrc = fs.readFileSync(
-    path.join(__dirname, '..', '..', 'src', 'views', 'settingsWebviewProvider.ts'),
-    'utf8'
-  );
-
-  it('escapes every settings value interpolated into the inline script', () => {
-    for (const raw of ["'${activeProvider}'", "'${activeModel}'"]) {
-      expect(providerSrc).not.toContain(raw);
-    }
-    expect(providerSrc).toContain('escapeJsString(activeProvider)');
-    expect(providerSrc).toContain('escapeJsString(activeModel)');
-  });
-
-  it('guards getModel against a missing model select element', () => {
-    const handlerIndex = providerSrc.indexOf('function getModel()');
-    expect(handlerIndex).toBeGreaterThan(-1);
-    const handler = providerSrc.slice(handlerIndex, handlerIndex + 600);
-    expect(handler).toContain('if (!select)');
-  });
-});

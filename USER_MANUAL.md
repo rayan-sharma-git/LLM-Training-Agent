@@ -32,7 +32,7 @@ The **Reports** view (or `LLM Training Agent: View Report`) opens the latest sav
 
 ## 7. Configuring an AI provider
 
-In the **Settings** view pick a provider (Ollama is the default and needs no API key), enter the model and key if needed, then **Save** and **Test Connection**. **Remove Key** deletes the stored key. Keys are kept in VS Code SecretStorage, never in your project.
+In the **Settings** view pick a provider (Ollama is the default and needs no API key), enter the model and key if needed, then **Save** and **Test Connection**. **Remove Key** deletes the stored key. Keys are kept in VS Code SecretStorage, never in your project. The settings page shows only whether a key is saved (never the key itself), and **Test Connection** uses the saved key when the field is empty. The backend holds keys in memory only, so the extension sends your saved provider, model and keys to it again every time it starts — you do not re-enter them.
 
 Supported providers: Ollama, OpenAI, Anthropic, Google Gemini, DeepSeek, Cohere, OpenRouter, and any OpenAI-compatible server (e.g. LM Studio).
 
@@ -54,7 +54,7 @@ do not install anything by hand:
 1. It finds a Python 3.10+ interpreter (`llmTrainingAgent.pythonPath` if you
    set one, otherwise a bundled interpreter, otherwise `python`/`py` on PATH).
 2. It checks that every package in the bundled `backend/requirements.txt`
-   imports (developer tools from the root `requirements.txt` are never
+   is installed at a new enough version (developer tools from the root `requirements.txt` are never
    installed for normal users).
 3. If packages are missing it shows **Install Dependencies** (plus
    **Show Manual Command** / **Cancel**). Approving runs pip with progress
@@ -101,7 +101,7 @@ success), then retry **Analyze Project**. Developer tooling
 ## 11. Troubleshooting and limitations
 
 - Backend will not start: open the **LLM Training Agent: Backend** output channel (see §10). Usually Python or its packages are missing — approving the install prompt fixes it; the channel names the exact interpreter, missing packages, and manual command.
-- Webview shows "Could not register service worker" or buttons do nothing: reload the window. If it persists, the output channel and the extension log (command names only, never keys) say which handler failed.
+- Webview shows "Could not register service worker" or buttons do nothing: reload the window (**Developer: Reload Window**). That service-worker message comes from VS Code's own webview host and usually clears on reload; if buttons still do nothing, open **Developer: Open Webview Developer Tools** for that view. If it persists, the output channel and the extension log (command names only, never keys) say which handler failed.
 - No folder open / path outside the open folder: open the project folder first; only it is ever read.
 - Chat says no provider is available: configure one in Settings and test the connection.
 

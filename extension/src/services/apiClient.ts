@@ -74,6 +74,55 @@ export class ApiError extends Error {
 
 const SECRET_KEY_PREFIX = 'llmTrainingAgent.apiKey.';
 
+/** Chat and analysis call an LLM, which on a local model can take minutes. */
+const CHAT_TIMEOUT_MS = 300_000;
+const ANALYSIS_TIMEOUT_MS = 600_000;
+
+/**
+ * Turn a backend error body into one readable sentence.
+ *
+ * The backend answers with several shapes: `{detail: "text"}`,
+ * `{detail: {errorCode, message}}`, FastAPI validation lists, or `{message}`.
+ * Showing the raw JSON (as an earlier version did) is unreadable.
+ */
+export function describeErrorBody(data: unknown): string | undefined {
+  if (typeof data === 'string') {
+    return data.trim() || undefined;
+  }
+  if (!data || typeof data !== 'object') {
+    return undefined;
+  }
+  const body = data as Record<string, unknown>;
+  const detail = body.detail;
+  if (typeof detail === 'string' && detail) {
+    return detail;
+  }
+  if (Array.isArray(detail)) {
+    const parts = detail
+      .map((item) => {
+        if (item && typeof item === 'object') {
+          const entry = item as { loc?: unknown[]; msg?: unknown };
+          const where = Array.isArray(entry.loc) ? entry.loc.filter((p) => p !== 'body').join('.') : '';
+          return entry.msg ? (where ? `${where}: ${String(entry.msg)}` : String(entry.msg)) : '';
+        }
+        return typeof item === 'string' ? item : '';
+      })
+      .filter(Boolean);
+    if (parts.length) {
+      return parts.join('; ');
+    }
+  }
+  const source = detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : body;
+  if (typeof source.message === 'string' && source.message) {
+    const code = typeof source.errorCode === 'string' && source.errorCode ? ` (${source.errorCode})` : '';
+    return `${source.message}${code}`;
+  }
+  if (detail && typeof detail === 'object') {
+    return JSON.stringify(detail);
+  }
+  return undefined;
+}
+
 export class ApiClient {
   private client: AxiosInstance;
   private getDynamicBaseUrl?: () => string;
@@ -112,17 +161,18 @@ export class ApiClient {
           );
         }
         if (error.response) {
-          const data = error.response.data as Record<string, any> | undefined;
-          const apiError = data as { detail?: any; message?: string; errorCode?: string } | undefined;
-          let message: string;
-          if (apiError?.detail) {
-            message = typeof apiError.detail === 'object' ? JSON.stringify(apiError.detail) : String(apiError.detail);
-          } else if (apiError?.message) {
-            message = String(apiError.message);
-          } else {
-            message = error.message;
-          }
-          throw new ApiError(message, error.response.status, data);
+          throw new ApiError(
+            describeErrorBody(error.response.data) ?? error.message,
+            error.response.status,
+            error.response.data
+          );
+        } else if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+          throw new ApiError(
+            'The backend did not answer in time. A slow local model can need longer; ' +
+              'check the "LLM Training Agent: Backend" output channel to see whether it is still working.',
+            0,
+            { reason: 'timeout' }
+          );
         } else if (error.request) {
           throw new ApiError(
             'No response from backend — the backend may still be starting. ' +
@@ -186,6 +236,11 @@ export class ApiClient {
     await secretStore.delete(this.getSecretKey(provider));
   }
 
+  /** Whether a key is saved for *provider*. Never exposes the key itself. */
+  async hasApiKey(provider: string): Promise<boolean> {
+    return Boolean(await this.getApiKey(provider));
+  }
+
   // ------------------------------------------------------------------
   // API methods
   // ------------------------------------------------------------------
@@ -199,9 +254,11 @@ export class ApiClient {
     if (!projectPath || !projectPath.trim()) {
       throw new ApiError('No project/workspace is currently open. Please open a folder first.', 0);
     }
-    const response = await this.client.post('/api/v1/project/analyze', {
-      projectPath,
-    });
+    const response = await this.client.post(
+      '/api/v1/project/analyze',
+      { projectPath },
+      { timeout: ANALYSIS_TIMEOUT_MS }
+    );
     return response.data as AnalysisResult;
   }
 
@@ -229,7 +286,9 @@ export class ApiClient {
     maxFiles?: number;
     useLlm?: boolean;
   } = {}): Promise<any> {
-    const response = await this.client.post('/api/v1/dataset/clean', options);
+    const response = await this.client.post('/api/v1/dataset/clean', options, {
+      timeout: ANALYSIS_TIMEOUT_MS,
+    });
     return response.data;
   }
 
@@ -247,7 +306,9 @@ export class ApiClient {
     if (options.provider) {
       payload.provider = options.provider;
     }
-    const response = await this.client.post('/api/v1/chat/message', payload);
+    const response = await this.client.post('/api/v1/chat/message', payload, {
+      timeout: CHAT_TIMEOUT_MS,
+    });
     return response.data as ChatResponse;
   }
 

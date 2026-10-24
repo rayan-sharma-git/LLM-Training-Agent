@@ -17,6 +17,7 @@ from pathlib import Path
 REQUIRED_BACKEND_MODULES = [
     "main.py",
     "requirements.txt",
+    "check_requirements.py",
     "api/routes.py",
     "api/result_mapping.py",
     "ai/llm.py",
@@ -44,6 +45,8 @@ REQUIRED_OUT_MODULES = [
     "out/commands/changeCommands.js",
     "out/commands/chatCommands.js",
     "out/services/apiClient.js",
+    "out/services/backendSync.js",
+    "out/services/providers.js",
     "out/services/backendManager.js",
     "out/services/dependencyManager.js",
     "out/services/extensionPaths.js",
@@ -53,6 +56,10 @@ REQUIRED_OUT_MODULES = [
     "out/views/settingsWebviewProvider.js",
     "out/views/simpleTreeView.js",
     "out/views/viewIds.js",
+    "out/views/webviewHtml.js",
+    # The webview scripts are plain files; without them every button is dead.
+    "media/chat.js",
+    "media/settings.js",
 ]
 
 #: Nothing matching these may ship.

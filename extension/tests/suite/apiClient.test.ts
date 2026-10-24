@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios, { AxiosError } from 'axios';
-import { ApiClient, ApiError, ChatResponse } from '../../src/services/apiClient';
+import { ApiClient, ApiError, ChatResponse, describeErrorBody } from '../../src/services/apiClient';
 
 vi.mock('axios');
 
@@ -48,7 +48,12 @@ describe('ApiClient', () => {
     post.mockResolvedValueOnce({ data: mockResponse });
     const result = await client.analyzeProject('/tmp/test');
     expect(result).toEqual(mockResponse);
-    expect(post).toHaveBeenCalledWith('/api/v1/project/analyze', { projectPath: '/tmp/test' });
+    // Analysis calls an LLM, so it must not use the short default timeout.
+    expect(post).toHaveBeenCalledWith(
+      '/api/v1/project/analyze',
+      { projectPath: '/tmp/test' },
+      { timeout: 600_000 }
+    );
   });
 
   it('should send chat message', async () => {
@@ -60,7 +65,7 @@ describe('ApiClient', () => {
     post.mockResolvedValueOnce({ data: mockResponse });
     const result = await client.sendChatMessage('hello');
     expect(result).toEqual(mockResponse);
-    expect(post).toHaveBeenCalledWith('/api/v1/chat/message', { message: 'hello' });
+    expect(post).toHaveBeenCalledWith('/api/v1/chat/message', { message: 'hello' }, { timeout: 300_000 });
   });
 
   it('should get a project report with its project scope', async () => {
@@ -102,5 +107,30 @@ describe('ApiClient', () => {
     get.mockResolvedValueOnce({ data: { providers: ['openai', 'ollama'] } });
     const result = await client.listProviders();
     expect(result).toEqual({ providers: ['openai', 'ollama'] });
+  });
+});
+
+describe('describeErrorBody', () => {
+  it('reads FastAPI string details', () => {
+    expect(describeErrorBody({ detail: 'Unknown provider' })).toBe('Unknown provider');
+  });
+
+  it('reads structured {errorCode, message} details without printing raw JSON', () => {
+    expect(describeErrorBody({ detail: { errorCode: 'INVALID_PROVIDER_URL', message: 'URL is not allowed' } })).toBe(
+      'URL is not allowed (INVALID_PROVIDER_URL)'
+    );
+  });
+
+  it('flattens validation error lists', () => {
+    expect(
+      describeErrorBody({ detail: [{ loc: ['body', 'model'], msg: 'field required' }] })
+    ).toBe('model: field required');
+  });
+
+  it('reads top-level messages and plain strings, and gives up on nothing', () => {
+    expect(describeErrorBody({ message: 'boom' })).toBe('boom');
+    expect(describeErrorBody('  plain  ')).toBe('plain');
+    expect(describeErrorBody(undefined)).toBeUndefined();
+    expect(describeErrorBody({})).toBeUndefined();
   });
 });
