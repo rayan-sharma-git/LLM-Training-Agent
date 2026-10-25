@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from models.schemas import ProjectContext, EngineeringReport, Recommendation, ChatMessage
 from ai.providers import get_provider
-from core.config import get_settings, get_active_provider
+from core.config import get_settings, get_active_provider, get_active_model
 from core.errors import AppError
 from core.redaction import scrub, scrub_obj
 
@@ -51,6 +51,37 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "… [truncated]"
 
 
+
+def _http_error_parts(error: BaseException) -> "tuple[Optional[int], str]":
+    """(HTTP status, response body text) of an httpx-style error, else (None, "")."""
+    response = getattr(error, "response", None)
+    if response is None:
+        return None, ""
+    status = getattr(response, "status_code", None)
+    try:
+        body = response.text
+    except Exception:  # streaming responses that were never read
+        body = ""
+    return (status if isinstance(status, int) else None), (body or "")[:1000]
+
+
+def _first_sentence(text: str, limit: int = 200) -> str:
+    """A short single-line summary of *text*, unwrapping {"error": "..."} bodies."""
+    text = (text or "").strip()
+    if text.startswith("{"):
+        try:
+            import json
+
+            data = json.loads(text)
+            err = data.get("error", data.get("message")) if isinstance(data, dict) else None
+            if isinstance(err, dict):
+                err = err.get("message")
+            if isinstance(err, str) and err.strip():
+                text = err.strip()
+        except ValueError:
+            pass
+    return " ".join(text.split())[:limit]
+
 class ChatEngine:
     """Manages conversational interactions about the project."""
 
@@ -59,6 +90,14 @@ class ChatEngine:
         # the runtime-selected provider, falling back to the configured default.
         self.provider_name = provider_name or get_active_provider() or get_settings().default_provider
         self._provider = None
+
+    @property
+    def model_name(self) -> str:
+        """The model the provider is configured to use (for error messages)."""
+        try:
+            return get_active_model(self.provider_name) or "(default)"
+        except Exception:
+            return "(default)"
 
     @property
     def provider(self):
@@ -125,11 +164,41 @@ class ChatEngine:
         credentials before being placed in details (details are for logs —
         the user-facing ``message`` is always friendly static text).
         """
-        text = str(error).lower()
+        status, body = _http_error_parts(error)
+        # httpx's own message for an HTTP error ("Client error '404 Not Found'
+        # for url ...") omits the response body, which is where providers say
+        # what is actually wrong (for example "model 'llama3.2' not found").
+        raw = " ".join(part for part in (str(error), body) if part)
+        text = raw.lower()
         type_name = type(error).__name__.lower()
-        scrubbed = scrub(str(error))[:300]
+        scrubbed = scrub(raw)[:300]
+        # Only the provider's own response body is shown to the user. The text
+        # of a local exception (stack detail, paths) is logged, never displayed.
+        reason = _first_sentence(scrub(body)) if body else ""
+        model = self.model_name
 
-        if "timeout" in type_name or "timed out" in text or "timeout" in text:
+        if status == 404 and self.provider_name == "ollama" and "model" in text:
+            code = "INVALID_MODEL"
+            message = (
+                f"Ollama does not have the model \"{model}\". Run `ollama pull {model}` "
+                "or choose an installed model in Settings (Refresh Models lists them)."
+            )
+        elif status in (401, 403):
+            code = "INVALID_API_KEY"
+            message = (
+                "The provider rejected the configured API key. Update it in "
+                "Settings (Command Palette: 'AI Provider: Configure')."
+            )
+        elif status == 404 or (
+            "model" in text and any(m in text for m in ("not found", "does not exist", "unknown model", "invalid model", "unrecognized"))
+        ):
+            code = "INVALID_MODEL"
+            message = (
+                f"The provider could not find the model \"{model}\""
+                + (f" ({reason})" if reason else "")
+                + ". Choose another model in Settings."
+            )
+        elif "timeout" in type_name or "timed out" in text or "timeout" in text:
             code = "PROVIDER_TIMEOUT"
             message = "The AI provider did not respond in time. Please try again."
         elif any(m in text for m in ("401", "403", "invalid api key", "unauthorized", "authentication")):
@@ -147,12 +216,6 @@ class ChatEngine:
                 "The conversation is too long for the selected model. "
                 "Clear chat history and try again."
             )
-        elif "model" in text and any(
-            m in text
-            for m in ("not found", "does not exist", "unknown model", "invalid model", "unrecognized")
-        ):
-            code = "INVALID_MODEL"
-            message = "The selected model is unavailable on this provider. Choose another model in Settings."
         elif any(m in text for m in ("connection", "connect", "unreachable", "refused", "dns", "name or service")):
             code = "PROVIDER_UNAVAILABLE"
             if "ollama" in text or self.provider_name == "ollama":
@@ -165,8 +228,9 @@ class ChatEngine:
         else:
             code = "PROVIDER_UNAVAILABLE"
             message = (
-                "The AI provider failed to generate a response. "
-                "Please try again or check the provider in Settings."
+                "The AI provider failed to generate a response"
+                + (f": {reason}" if reason else ".")
+                + " Please try again or check the provider in Settings."
             )
         return AppError(
             message=message,
@@ -236,7 +300,15 @@ class ChatEngine:
         except AppError:
             raise
         except Exception as error:
-            logger.error(f"Chat provider call failed ({self.provider_name}): {error}")
+            status, body = _http_error_parts(error)
+            logger.error(
+                "Chat provider call failed (%s, %s%s): %s %s",
+                self.provider_name,
+                type(error).__name__,
+                f", HTTP {status}" if status else "",
+                scrub(str(error))[:300],
+                scrub(body)[:300],
+            )
             raise self._classify_provider_error(error) from None
 
         # Validate the provider's response shape before using it.
