@@ -24,28 +24,32 @@ class CohereProvider(AIProvider):
         if not self.api_key:
             raise ValueError("Cohere API key is required")
 
-    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
-        """Generate chat completion via Cohere API."""
-        # Cohere uses a different message format: chat_history + message
-        chat_history = []
-        last_message = ""
+    def build_payload(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+        """Build a Cohere **v2** chat request.
+
+        v2 takes one ``messages`` list (system, user and assistant turns in
+        order). The earlier code sent the v1 shape (``message`` +
+        ``chat_history``) to the v2 URL, which v2 rejects, and it discarded the
+        system prompt.
+        """
+        turns: List[Dict[str, str]] = []
+        system = kwargs.get("system")
+        if system and not any(m.get("role") == "system" for m in messages):
+            turns.append({"role": "system", "content": system})
         for msg in messages:
             role = msg.get("role", "user")
-            content = msg.get("content", "")
-            if role == "system":
-                continue  # Cohere v2 doesn't support system in the same way
-            chat_history.append({"role": role, "content": content})
-
-        if chat_history:
-            last = chat_history.pop()
-            last_message = last.get("content", "")
-
-        payload: Dict[str, Any] = {
+            if role not in ("system", "user", "assistant"):
+                role = "user"
+            turns.append({"role": role, "content": msg.get("content", "")})
+        return {
             "model": self.model,
-            "chat_history": chat_history,
-            "message": last_message,
+            "messages": turns,
             "temperature": kwargs.get("temperature", 0.7),
         }
+
+    async def chat_completion(self, messages: List[Dict[str, str]], **kwargs) -> Dict[str, Any]:
+        """Generate chat completion via Cohere API."""
+        payload = self.build_payload(messages, **kwargs)
 
         async with httpx.AsyncClient() as client:
             response = await client.post(
@@ -60,19 +64,23 @@ class CohereProvider(AIProvider):
             response.raise_for_status()
             data = response.json()
 
-        # Cohere v2 returns text in different places depending on response
-        text = data.get("text", "")
-        if not text and "message" in data:
-            content = data["message"].get("content", [])
-            if isinstance(content, list) and len(content) > 0:
-                text = content[0].get("text", "")
+        # v2: {"message": {"content": [{"type": "text", "text": "..."}]}}
+        text = ""
+        content = (data.get("message") or {}).get("content", [])
+        if isinstance(content, list):
+            text = "".join(
+                part.get("text", "") for part in content
+                if isinstance(part, dict) and part.get("type", "text") == "text"
+            )
+        elif isinstance(content, str):
+            text = content
 
         return {
             "content": text,
             "model": self.model,
             "usage": {
-                "prompt_tokens": data.get("usage", {}).get("read_tokens", 0),
-                "completion_tokens": data.get("usage", {}).get("generated_tokens", 0),
+                "prompt_tokens": ((data.get("usage") or {}).get("tokens") or {}).get("input_tokens", 0),
+                "completion_tokens": ((data.get("usage") or {}).get("tokens") or {}).get("output_tokens", 0),
             },
         }
 
@@ -96,4 +104,4 @@ class CohereProvider(AIProvider):
         return await self.validate_credentials()
 
     def get_supported_models(self) -> List[str]:
-        return ["command-r", "command-r-plus", "command"]
+        return ["command-a-03-2025", "command-r-plus", "command-r"]
