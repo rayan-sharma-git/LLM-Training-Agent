@@ -1,108 +1,173 @@
 # User Manual
 
-The LLM Training Agent reads your fine-tuning project and tells you whether training it is worth it, what it would cost, how long it would take, and what to fix first.
+Everything the LLM Training Agent can do, and how to use it.
 
-For installation see [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md). For removal see [DELETION.md](DELETION.md).
+- Installing it: [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md)
+- Removing it: [DELETION.md](DELETION.md)
 
-## 1. Opening the panel
+## 1. Opening the extension
 
-Click the **LLM Training Agent** icon in the VS Code activity bar. It has four views: **Overview** (project status), **Chat** (analysis and conversation), **Reports** (saved reports), and **Settings** (provider and API key setup).
+Click the **LLM Training Agent** icon in the VS Code sidebar. It has four views:
 
-## 2. Analyze Project
+| View | What it is |
+|---|---|
+| **Overview** | Status of your project, plus quick buttons |
+| **Chat** | The analysis report and your conversation with the agent |
+| **Reports** | Saved reports |
+| **Settings** | Choose an AI provider and save its key |
 
-This is the main workflow. Open your project folder, then click **Analyze Project** in Overview or run `LLM Training Agent: Analyze Project` from the command palette (`Ctrl+Shift+P`).
+Open your project folder first. The extension only ever reads that folder.
 
-The extension scans your datasets, prompts, configs, and scripts and posts one report to the **Chat** panel. Large datasets can take a while; you can cancel the progress notification. If one section fails, the rest still runs and the report is marked partial. Only the open folder is ever read.
+## 2. First run
 
-## 3. What the report contains
+The first time you open the extension, it gets its Python backend ready on its own:
 
-Each value is labelled *measured* (from your files), *calculated* (from a formula), *heuristic* (rule of thumb), or *assumed*. The report covers: detected task, dataset size and quality, prompt clarity, hyperparameter review, model advice, detected GPUs, training-time and cost estimates with assumptions, risks, prioritised recommendations, and a concrete next experiment.
+1. It looks for Python 3.10 or newer: your `llmTrainingAgent.pythonPath` setting first, then a bundled one, then `python` or `py` on your PATH.
+2. It checks that the packages in the bundled `backend/requirements.txt` are installed and new enough. It never installs the developer tools from the root `requirements.txt`.
+3. If something is missing, it installs the packages for you automatically. Progress shows in the **LLM Training Agent: Backend** output channel. This can take a minute or two.
+4. It checks again after installing, then starts the backend.
 
-## 4. Analyze Dataset
+If you would rather be asked first, turn off the setting `llmTrainingAgent.autoInstallDependencies`. A dialog then offers **Install Dependencies**, **Show Manual Command** or **Cancel**, and if you cancel you are not asked again until you restart VS Code.
 
-Run `LLM Training Agent: Analyze Dataset` and pick a folder in the dialog for a dataset-only check. For the full picture (model, hardware, cost), use Analyze Project.
+If your Python refuses system-wide installs (common with Homebrew, Debian and Ubuntu), the output channel says so. Create a virtual environment (`python -m venv .venv`), install `backend/requirements.txt` into it, and set `llmTrainingAgent.pythonPath` to its Python.
+
+## 3. Analyze Project
+
+This is the main feature. Click **Analyze Project** in Overview, or run `LLM Training Agent: Analyze Project` (`Ctrl+Shift+P`). You can also type "analyze my project" in the chat.
+
+It scans your datasets, prompts, configs and scripts and posts one report in the **Chat** view. Large datasets take time, and you can cancel from the progress notification. If one section fails the rest still runs and the report is marked partial.
+
+## 4. What the report contains
+
+The report covers:
+
+- the detected task,
+- dataset size and quality,
+- prompt clarity,
+- a hyperparameter review,
+- model advice,
+- the GPUs it detected,
+- training time and cost estimates, with their assumptions,
+- risks,
+- prioritised recommendations,
+- one concrete next experiment.
+
+Each value is labelled *measured* (from your files), *calculated* (from a formula), *heuristic* (a rule of thumb) or *assumed*.
 
 ## 5. Chat
 
-The **Chat** view holds the report and answers follow-up questions about your project. History is per project. If no AI provider is configured, chat says so instead of guessing.
+The **Chat** view shows the report and answers follow-up questions about your project. History is kept per project.
 
-## 6. Reports
+**Run Analyze Project first.** Chat answers from the analysis. Without one, the agent only has general knowledge and tells you to run it.
 
-The **Reports** view (or `LLM Training Agent: View Report`) opens the latest saved report for the current project. If no analysis has run yet, it says so.
+**Copying.** Every answer has a **Copy answer** button. Every code block has its own **Copy** button at the top. It copies only that snippet. The button shows **Copied ✓** when it worked.
 
-## 7. Configuring an AI provider
+**Asking it to do things.** The chat can act, not only explain. Type an instruction such as:
 
-In the **Settings** view pick a provider (Ollama is the default and needs no API key), enter the model and key if needed, then **Save** and **Test Connection**. **Remove Key** deletes the stored key. Keys are kept in VS Code SecretStorage, never in your project. The settings page shows only whether a key is saved (never the key itself), and **Test Connection** uses the saved key when the field is empty. The backend holds keys in memory only, so the extension sends your saved provider, model and keys to it again every time it starts — you do not re-enter them.
+- "clean my dataset"
+- "remove duplicates from my dataset"
+- "analyze my project"
 
-Supported providers: Ollama, OpenAI, Anthropic, Google Gemini, DeepSeek, Cohere, OpenRouter, and any OpenAI-compatible server (e.g. LM Studio).
+A question like "how do I remove duplicates?" is answered as a normal question.
+
+If no AI provider is set up, or the provider fails, the chat tells you why. For example, with Ollama it tells you to run `ollama pull <model>`.
+
+## 6. Clean Dataset
+
+Cleans every dataset file in your project (`.jsonl`, `.json`, `.csv` and similar). Start it from the chat, or run `LLM Training Agent: Clean Dataset`, or use the button in Overview.
+
+The agent asks you:
+
+**How should I clean it?**
+
+| Choice | What happens | Cost |
+|---|---|---|
+| **Use scripts** | Fixes extra whitespace and control characters. Nothing leaves your computer. | Free |
+| **Use the AI model** | Sends the data to your provider in small chunks, so it can also fix typos and formatting. | Free with Ollama. With a paid API it uses your credits, so use it with care on big datasets. |
+
+**Remove duplicate records?** Removes exact copies and keeps the first. This is a script step, so it is free in both modes. (If you already said "duplicates" in your message, it does not ask again.)
+
+Then the agent:
+
+1. cleans the data and shows a summary, for example `10 in → 8 out (2 duplicates removed)`,
+2. puts the cleaned versions in `.llm-training-agent/cleaned/`,
+3. prepares each changed file as a proposal. Choose **Review changes** to see the difference (section 8) and apply it.
+
+Your original files are never overwritten without your approval. No record is lost: records out plus duplicates removed always equals records in. A file that is already clean is left alone. A file too big to review (over 2,000,000 characters) stays as a cleaned copy for you to copy over yourself.
+
+## 7. Analyze Dataset
+
+Run `LLM Training Agent: Analyze Dataset` and pick a folder. This checks the dataset only. For the full picture (model, hardware, cost) use Analyze Project.
 
 ## 8. View Changes
 
-Run `LLM Training Agent: View Changes` to review file edits the agent proposed. Each opens in a diff editor with **Approve & Apply**, **Reject**, or **Dismiss**. Nothing is written without approval, conflicts with your newer edits are blocked, backups are kept for rollback, and proposals expire after 24 hours.
+Run `LLM Training Agent: View Changes` to see edits the agent proposed. Each one opens as a side-by-side diff with three choices: **Approve & Apply**, **Reject** or **Dismiss**.
 
-Dataset cleaning and experiment tracking have no dedicated views: ask the chat agent to clean a dataset (output goes to `.llm-training-agent/cleaned/`, originals untouched), and experiments are available through the backend API.
+- Nothing is written without your approval.
+- If you edited the file yourself in the meantime, the change is blocked instead of overwriting your work.
+- Backups are kept so you can roll back.
+- Proposals expire after 24 hours.
 
-## 9. Settings and storage
+## 9. Reports
 
-Settings (`llmTrainingAgent.provider`, `llmTrainingAgent.model`, `llmTrainingAgent.pythonPath`, `llmTrainingAgent.backendUrl`) are user-level and never stored in your project. Analysis history lives in the extension's VS Code global storage (`llm_training_agent.db`); pending changes and backups live in `.llm_training_agent/` and `.llm_training_agent_backups/` inside your project. See [DELETION.md](DELETION.md) for cleanup.
+The **Reports** view, or `LLM Training Agent: View Report`, opens the latest saved report for the current project. If no analysis has run yet, it says so.
 
-## 10. Backend runtime setup (automatic)
+## 10. Choosing an AI provider
 
-On first use the extension prepares its Python backend automatically — you
-do not install anything by hand:
+In the **Settings** view:
 
-1. It finds a Python 3.10+ interpreter (`llmTrainingAgent.pythonPath` if you
-   set one, otherwise a bundled interpreter, otherwise `python`/`py` on PATH).
-2. It checks that every package in the bundled `backend/requirements.txt`
-   is installed at a new enough version (developer tools from the root `requirements.txt` are never
-   installed for normal users).
-3. If packages are missing it shows **Install Dependencies** (plus
-   **Show Manual Command** / **Cancel**). Approving runs pip with progress
-   in the notification area and streams output to the
-   **LLM Training Agent: Backend** output channel.
-4. After installing it re-checks the imports instead of assuming success,
-   then starts the backend. A declined prompt is remembered for the session
-   so you are not asked again on every click.
+1. Pick a provider.
+2. Type the model name (the box suggests some, and **Refresh Models** loads the list from the provider).
+3. Paste your API key if the provider needs one. Ollama does not.
+4. For Ollama or an OpenAI-compatible server, check the URL.
+5. Press **Save**, wait for "Ready to use", then press **Test Connection**.
 
-To check state yourself: open the **LLM Training Agent: Backend** output
-channel — it logs the extension install dir, the backend entry point, each
-Python candidate tried, and whether it was ready/missing/too old. The
-interpreter actually used is the `Python interpreter : ... (ready ...)` line;
-it is `llmTrainingAgent.pythonPath` when that setting is non-empty.
+Supported: Ollama, OpenAI, Anthropic, Google Gemini, DeepSeek, Cohere, OpenRouter, and any OpenAI-compatible server (for example LM Studio).
 
-If setup fails: read the channel lines (missing packages, "too old", "could
-not be started", or pip/network errors each get a distinct message), then
-retry by running **Analyze Project** again. For a manual install, run the
-exact command the channel printed under `Manual install command` — with the
-extension's own backend it has the form below, using YOUR interpreter path
-from the channel log and the bundled requirements file inside the installed
-extension (on Windows the extension lives under
-`C:\Users\<you>\.vscode\extensions\rayansharma.llm-training-agent-1.0.0`):
+About your key:
 
-```powershell
-& "<python-from-channel-log>" -m pip install -r "<extension-install-dir>\backend\requirements.txt"
-```
+- It is stored in VS Code's secure storage, never in your project.
+- After saving, the page only says a key is saved. It never shows the key again.
+- You enter it once. It is remembered, including after you restart VS Code.
+- **Test Connection** uses the saved key when the box is empty.
+- **Remove API Key** deletes it.
 
-Concrete example when the channel shows the interpreter
-`C:\Python312\python.exe` and the install dir above:
+## 11. Settings and stored data
+
+Settings are user-level, so they are never saved inside your project: `llmTrainingAgent.provider`, `.model`, `.pythonPath`, `.backendUrl`, `.autoInstallDependencies`, `.ollamaBaseUrl` and `.openaiCompatibleBaseUrl`.
+
+| What | Where |
+|---|---|
+| Analysis history (`llm_training_agent.db`) | VS Code global storage for the extension |
+| Pending changes and backups | `.llm_training_agent/` and `.llm_training_agent_backups/` inside your project |
+| Cleaned datasets | `.llm-training-agent/cleaned/` inside your project |
+
+See [DELETION.md](DELETION.md) to clean these up.
+
+## 12. Troubleshooting
+
+**The backend will not start.** Open **View → Output** and choose **LLM Training Agent: Backend**. It lists the Python it tried and whether it was ready, missing packages, or too old. Usually the extension fixes this by itself by installing the missing packages. Developer tools (testing and linting) live only in the root `requirements.txt` and are never needed to run the extension.
+
+To install by hand, run the command the channel prints under `Manual install command`. On Windows it looks like this (use your own Python path and extension folder):
 
 ```powershell
 & "C:\Python312\python.exe" -m pip install -r "C:\Users\<you>\.vscode\extensions\rayansharma.llm-training-agent-1.0.0\backend\requirements.txt"
 ```
 
-From a local repository checkout with that interpreter selected, the
-equivalent is `python -m pip install -r backend/requirements.txt` run from
-the repository root. Confirm with
-`& "<python>" -c "import fastapi, uvicorn, sqlalchemy, httpx"` (no output =
-success), then retry **Analyze Project**. Developer tooling
-(`pytest`, `ruff`, `black`, `mypy`) lives only in the root
-`requirements.txt` and is never needed to run the extension.
+Then restart VS Code. To check that it worked, run `<your python> -c "import fastapi, uvicorn, sqlalchemy, httpx"`. No output means success. If you are working from a repository checkout, run `python -m pip install -r backend/requirements.txt` from the repository root.
 
-## 11. Troubleshooting and limitations
+**Buttons do nothing, or you see "Could not register service worker".** That message comes from VS Code itself and usually clears after **Developer: Reload Window**. If it does not, run **Developer: Open Webview Developer Tools** on that view. The Output channels name the command that failed (never your keys).
 
-- Backend will not start: open the **LLM Training Agent: Backend** output channel (see §10). Usually Python or its packages are missing — approving the install prompt fixes it; the channel names the exact interpreter, missing packages, and manual command.
-- Webview shows "Could not register service worker" or buttons do nothing: reload the window (**Developer: Reload Window**). That service-worker message comes from VS Code's own webview host and usually clears on reload; if buttons still do nothing, open **Developer: Open Webview Developer Tools** for that view. If it persists, the output channel and the extension log (command names only, never keys) say which handler failed.
-- No folder open / path outside the open folder: open the project folder first; only it is ever read.
-- Chat says no provider is available: configure one in Settings and test the connection.
+**Chat says the provider failed.** The message now says why. Common causes: the Ollama model is not downloaded (`ollama pull <model>`), Ollama is not running, the API key was rejected, or the model name is wrong. Check it in Settings.
 
-The extension never invents accuracy scores, and model prices come from a bundled reference that may be outdated — verify costs before spending. GPU detection is best-effort. Developed and tested mainly on Windows.
+**Chat says no provider is configured.** Choose one in Settings and press Test Connection.
+
+**"No folder open" or path outside the folder.** Open your project folder first. Only that folder is read.
+
+## 13. Limits
+
+- The extension never invents accuracy scores.
+- Model prices come from a bundled reference that may be out of date. Check costs before you spend.
+- GPU detection is best-effort.
+- Developed and tested mainly on Windows.
+- Experiment tracking is available through the backend API only, and has no view yet.

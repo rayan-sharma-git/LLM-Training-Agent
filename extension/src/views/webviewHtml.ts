@@ -194,6 +194,36 @@ const CHAT_CSS = `
       border-radius: 4px;
     }
     .body pre code { background: none; padding: 0; }
+    /* Code blocks: a header with the language and a Copy button */
+    .code-block {
+      margin: 6px 0;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .code-block pre { margin: 0; border-radius: 0; }
+    .code-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 3px 8px;
+      font-size: 0.8em;
+      background: var(--vscode-editorWidget-background, rgba(127,127,127,0.15));
+      border-bottom: 1px solid var(--vscode-panel-border);
+    }
+    .code-lang { opacity: 0.75; text-transform: lowercase; }
+    .copy-btn {
+      padding: 2px 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 3px;
+      background: transparent;
+      color: var(--vscode-foreground);
+      font-family: inherit;
+      font-size: inherit;
+      cursor: pointer;
+    }
+    .copy-btn:hover { background: var(--vscode-toolbar-hoverBackground, rgba(127,127,127,0.2)); }
+    .message-actions { display: flex; justify-content: flex-end; margin-top: 6px; font-size: 0.8em; }
     .body blockquote {
       margin: 6px 0;
       padding: 6px 10px;

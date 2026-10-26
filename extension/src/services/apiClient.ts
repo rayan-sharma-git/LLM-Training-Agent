@@ -1,5 +1,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import * as vscode from 'vscode';
+import type { CleaningResult } from './cleaningFlow';
+import type { EditSuggestion } from './editFlow';
 
 /**
  * The complete end-to-end analysis produced by one Analyze run.
@@ -285,11 +287,12 @@ export class ApiClient {
     outputDirectory?: string;
     maxFiles?: number;
     useLlm?: boolean;
-  } = {}): Promise<any> {
+    removeDuplicates?: boolean;
+  } = {}): Promise<CleaningResult> {
     const response = await this.client.post('/api/v1/dataset/clean', options, {
       timeout: ANALYSIS_TIMEOUT_MS,
     });
-    return response.data;
+    return response.data as CleaningResult;
   }
 
   async sendChatMessage(
@@ -430,6 +433,16 @@ export class ApiClient {
       projectRoot,
     });
     return response.data;
+  }
+
+  /** Ask the AI provider to rewrite one file. Returns a proposal; nothing is written. */
+  async suggestFileEdit(filePath: string, instruction: string, projectRoot: string): Promise<EditSuggestion> {
+    const response = await this.client.post(
+      '/api/v1/files/suggest',
+      { filePath, instruction, projectRoot },
+      { timeout: CHAT_TIMEOUT_MS }
+    );
+    return response.data as EditSuggestion;
   }
 
   async listFileChanges(projectRoot?: string, includeTerminal = true): Promise<{ changes: any[] }> {

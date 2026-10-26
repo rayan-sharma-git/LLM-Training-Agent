@@ -217,6 +217,29 @@ def build_snapshot(
     }
 
 
+def snapshot_from_stored_run(run: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Rebuild a chat snapshot from a persisted analysis run (see storage.analysis_store).
+
+    The in-memory snapshot is lost whenever the backend restarts (every VS Code
+    restart), but the finished analysis is stored in the database. Rebuilding
+    from it lets chat keep answering from the user's real results instead of
+    falling back to generic advice. Returns None when the run holds no context.
+    """
+    if not isinstance(run, dict) or not run.get("context"):
+        return None
+    results = dict(run.get("results") or {})
+    prediction = results.pop("prediction", None)
+    cost = results.pop("cost", None)
+    return build_snapshot(
+        run["context"],
+        run.get("report"),
+        list(run.get("recommendations") or []),
+        analyzer_results=results,
+        prediction=prediction,
+        cost=cost,
+    )
+
+
 def save_pipeline_snapshot(
     project_path: Optional[str],
     *,
@@ -264,6 +287,7 @@ __all__ = [
     "store",
     "build_snapshot",
     "save_pipeline_snapshot",
+    "snapshot_from_stored_run",
     "normalize_project_path",
     "normalize_session_id",
     "MAX_MESSAGES_PER_SESSION",

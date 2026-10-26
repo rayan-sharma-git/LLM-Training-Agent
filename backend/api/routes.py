@@ -43,7 +43,8 @@ from prediction.engine import PredictionEngine
 from recommendation.engine import RecommendationEngine
 from reports.generator import ReportGenerator
 from chat.engine import ChatEngine
-from chat.store import store, save_pipeline_snapshot
+from editing import assistant as editing_assistant
+from chat.store import store, save_pipeline_snapshot, snapshot_from_stored_run
 from core.errors import AppError, StorageError, ValidationError
 from core.config import get_settings, get_active_provider, get_active_model
 from core import runtime_config
@@ -987,7 +988,8 @@ async def clean_datasets(request: Dict[str, Any]):
       "maxChunkChars": 12000,
       "outputDirectory": ".llm-training-agent/cleaned",
       "maxFiles": 0,
-      "useLlm": true
+      "useLlm": true,
+      "removeDuplicates": false
     }
     ```
 
@@ -1000,6 +1002,9 @@ async def clean_datasets(request: Dict[str, Any]):
       and format, together with a manifest for verification.  Every record of
       every file is preserved; a chunk that fails validation keeps its original
       records instead of losing data.
+    * ``useLlm: false`` cleans with plain scripts only (no AI calls, no cost).
+    * ``removeDuplicates: true`` additionally drops exact duplicate records
+      (first copy kept), with a script, in either mode.
     """
     try:
         from pathlib import Path
@@ -1049,6 +1054,7 @@ async def clean_datasets(request: Dict[str, Any]):
             output_dir=request.get("outputDirectory"),
             max_files=max_files,
             use_llm=_as_bool(request.get("useLlm"), True),
+            remove_duplicates=_as_bool(request.get("removeDuplicates"), False),
         )
         return result
     except HTTPException:
@@ -1324,6 +1330,23 @@ def _snapshot_models(snapshot, project_path):
     return context, report, recommendations
 
 
+async def _restore_snapshot(project_path: str) -> Optional[Dict[str, Any]]:
+    """Chat context after a restart: rebuild it from the last stored analysis.
+
+    The in-memory snapshot disappears with the backend process. Never raises:
+    a database problem just means chat answers without project data (and says so).
+    """
+    try:
+        run = await get_latest_run(project_path, require_field="context")
+        snapshot = snapshot_from_stored_run(run) if run else None
+        if snapshot:
+            store.save_analysis(project_path, snapshot)
+        return snapshot
+    except Exception as error:  # noqa: BLE001 - best-effort context only
+        logger.warning(f"Could not restore the stored analysis for chat: {scrub_error(error)}")
+        return None
+
+
 @router.post("/chat/message")
 async def chat_message(request: Dict[str, Any]):
     """Send a message to the AI chat.
@@ -1355,6 +1378,8 @@ async def chat_message(request: Dict[str, Any]):
 
         history = _history_messages(project_path, session_id)
         snapshot = store.get_analysis(project_path)
+        if snapshot is None and project_path:
+            snapshot = await _restore_snapshot(project_path)
         context, report, recommendations = _snapshot_models(snapshot, project_path)
 
         engine = ChatEngine(provider_name=provider_name)
@@ -1374,6 +1399,7 @@ async def chat_message(request: Dict[str, Any]):
                 "references": [],
                 "confidence": "low",
                 "error": "PROVIDER_NOT_CONFIGURED",
+                "analysisAvailable": snapshot is not None,
                 "sessionId": session_id,
             }
         except AppError as e:
@@ -1384,6 +1410,7 @@ async def chat_message(request: Dict[str, Any]):
                 "references": [],
                 "confidence": "low",
                 "error": e.error_code,
+                "analysisAvailable": snapshot is not None,
                 "sessionId": session_id,
             }
 
@@ -1396,6 +1423,7 @@ async def chat_message(request: Dict[str, Any]):
             "references": response["references"],
             "confidence": response["confidence"],
             "model": response.get("model", provider_name or "unknown"),
+            "analysisAvailable": snapshot is not None,
             "sessionId": session_id,
         }
     except HTTPException:
@@ -1775,6 +1803,87 @@ async def propose_file_change(request: Dict[str, Any]):
         raise HTTPException(
             status_code=500,
             detail={"errorCode": "PROPOSE_FAILED", "message": "The change could not be proposed."},
+        )
+
+
+@router.post("/files/suggest")
+async def suggest_file_edit(request: Dict[str, Any]):
+    """Ask the AI provider to rewrite one project file as instructed.
+
+    Request body: ``{"projectRoot", "filePath", "instruction"}``. Nothing is
+    written: the answer is the proposed new content, which the caller submits
+    to ``/files/propose`` so the user can review the diff before it is applied.
+    """
+    try:
+        file_path = request.get("filePath")
+        instruction = request.get("instruction")
+        if not isinstance(file_path, str) or not file_path.strip() or len(file_path) > 4096 or "\x00" in file_path:
+            raise HTTPException(status_code=422, detail={"errorCode": "INVALID_PATH", "message": "filePath is invalid."})
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise HTTPException(status_code=422, detail={"errorCode": "INVALID_REQUEST", "message": "instruction must not be empty."})
+
+        store_ = _change_store(request.get("projectRoot"))
+        target = store_.project_file(file_path.strip())
+        if not target.is_file():
+            raise HTTPException(status_code=404, detail={"errorCode": "FILE_NOT_FOUND", "message": "The file was not found in this project."})
+        original = target.read_bytes().decode("utf-8-sig", errors="replace")
+        if len(original) > editing_assistant.MAX_EDIT_FILE_CHARS:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "errorCode": "FILE_TOO_LARGE",
+                    "message": (
+                        f"This file is larger than {editing_assistant.MAX_EDIT_FILE_CHARS:,} characters, "
+                        "which is too much to rewrite in one request. Edit it by hand or ask about a smaller file."
+                    ),
+                },
+            )
+
+        engine = ChatEngine(provider_name=request.get("provider"))
+        try:
+            provider = engine.provider
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"errorCode": "PROVIDER_NOT_CONFIGURED", "message": f"No AI provider is configured: {scrub(str(e))}. Open Settings to add one."},
+            )
+        try:
+            reply = await provider.chat_completion(
+                editing_assistant.build_edit_messages(file_path.strip(), original, instruction),
+                system=editing_assistant.EDIT_SYSTEM_PROMPT,
+                temperature=0.2,
+            )
+        except Exception as error:  # noqa: BLE001 - mapped to a friendly, scrubbed error
+            app_error = engine._classify_provider_error(error)
+            logger.warning(f"File edit provider error ({app_error.error_code}): {app_error.details}")
+            raise HTTPException(status_code=502, detail={"errorCode": app_error.error_code, "message": app_error.message})
+
+        text = reply.get("content") if isinstance(reply, dict) else None
+        extracted = editing_assistant.extract_file_from_reply(text or "")
+        if not extracted:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "errorCode": "NO_FILE_IN_REPLY",
+                    "message": "The model did not return an updated file. Try again, or rephrase what should change.",
+                },
+            )
+        proposed = editing_assistant.match_original_style(original, extracted["content"])
+        return {
+            "filePath": file_path.strip(),
+            "proposedContent": proposed,
+            "explanation": scrub(extracted["explanation"]),
+            **editing_assistant.assess(original, proposed),
+        }
+    except ChangeStoreError as e:
+        raise _change_http(e)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Suggest file edit failed", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"errorCode": "SUGGEST_FAILED", "message": "The edit could not be prepared. See the backend log."},
         )
 
 

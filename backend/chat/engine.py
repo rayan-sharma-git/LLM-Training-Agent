@@ -283,6 +283,16 @@ class ChatEngine:
         # Current turn: untrusted project data first, then the user's question.
         data_block = self._build_context_block(context, report, recommendations, snapshot)
         parts: List[str] = []
+        if not data_block:
+            # Without an analysis the model only knows what the user typed. Say so
+            # instead of letting it answer as if it had read the project.
+            system_prompt += (
+                "\n\n## No project analysis yet\n"
+                "No analysis has been run for this project, so you have NOT seen its files, "
+                "dataset or configuration. Answer from general knowledge only, do not invent "
+                "details about the project, and tell the user to click **Analyze Project** "
+                "so your answers can use their real data."
+            )
         if data_block:
             parts.append("<project_data>")
             parts.append(data_block)

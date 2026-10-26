@@ -272,6 +272,9 @@ export class BackendManager {
         pythonExe: installCandidate,
         backendMainPath: backendEntry,
         outputChannel: this.outputChannel,
+        autoInstall: vscode.workspace
+          .getConfiguration('llmTrainingAgent')
+          .get<boolean>('autoInstallDependencies', true),
         callbacks: {
           showPrompt: (message, opts, ...items) =>
             vscode.window.showInformationMessage(message, opts, ...items),

@@ -301,6 +301,67 @@ async def test_no_provider_applies_deterministic_cleaning(tmp_path):
 
 
 # ----------------------------------------------------------------------
+# Script-only mode and duplicate removal
+# ----------------------------------------------------------------------
+
+async def test_scripts_mode_never_calls_the_llm_even_when_one_is_available(tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(30))
+    llm = RecordingLLM(available=True)
+    cleaner = DatasetCleaner(llm=llm, chunk_size=10)
+
+    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]), use_llm=False)
+
+    assert llm.prompts == []
+    assert result.llm_used is False
+    assert result.records_preserved is True
+    assert not any("No AI provider" in w for w in result.warnings)
+
+
+async def test_duplicates_are_kept_by_default(tmp_path):
+    records = make_records(3) + make_records(3)
+    write_jsonl(tmp_path / "train.jsonl", records)
+    cleaner = DatasetCleaner(llm=RecordingLLM(available=False), chunk_size=4)
+
+    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]))
+
+    assert result.total_records_out == 6
+    assert result.total_duplicates_removed == 0
+
+
+async def test_remove_duplicates_drops_exact_copies_across_chunks_and_keeps_order(tmp_path):
+    base = make_records(5)
+    # The copy of record 0 sits in a different chunk; the third copy differs only by whitespace.
+    records = base + [dict(base[0]), {**base[1], "prompt": "  p1  "}, {"id": 99, "prompt": "new", "response": "x"}]
+    write_jsonl(tmp_path / "train.jsonl", records)
+    cleaner = DatasetCleaner(llm=RecordingLLM(available=False), chunk_size=3)
+
+    result = await cleaner.clean_project(
+        context_for(tmp_path, ["train.jsonl"]), use_llm=False, remove_duplicates=True
+    )
+
+    cleaned = read_jsonl(tmp_path / ".llm-training-agent" / "cleaned" / "train.jsonl")
+    assert [r["id"] for r in cleaned] == [0, 1, 2, 3, 4, 99]
+    summary = result.files[0]
+    assert summary.records_in == 8 and summary.records_out == 6
+    assert summary.duplicates_removed == 2 == result.total_duplicates_removed
+    assert result.records_preserved is True, "records_out + duplicates_removed must equal records_in"
+
+
+async def test_remove_duplicates_is_a_script_step_in_llm_mode_too(tmp_path):
+    records = make_records(4) + make_records(4)
+    write_jsonl(tmp_path / "train.jsonl", records)
+    llm = RecordingLLM(available=True)
+    cleaner = DatasetCleaner(llm=llm, chunk_size=4)
+
+    result = await cleaner.clean_project(
+        context_for(tmp_path, ["train.jsonl"]), use_llm=True, remove_duplicates=True
+    )
+
+    assert len(llm.prompts) == 2, "the model still sees every chunk"
+    assert result.total_records_out == 4 and result.total_duplicates_removed == 4
+
+
+# ----------------------------------------------------------------------
 # API endpoints
 # ----------------------------------------------------------------------
 
@@ -358,6 +419,18 @@ def test_clean_endpoint_discovers_project_dataset_files(api_client, tmp_path):
     }
 
 
+def test_clean_endpoint_remove_duplicates_flag(api_client, tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(3) + make_records(3))
+    response = api_client.post(
+        "/api/v1/dataset/clean",
+        json={"projectPath": str(tmp_path), "datasetPaths": ["train.jsonl"], "useLlm": False, "removeDuplicates": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total_records_in"] == 6 and body["total_records_out"] == 3
+    assert body["total_duplicates_removed"] == 3
+
+
 def test_clean_endpoint_requires_a_target(api_client):
     response = api_client.post("/api/v1/dataset/clean", json={})
     assert response.status_code == 400
@@ -402,3 +475,17 @@ async def test_llm_helper_rejects_non_json_payload(monkeypatch):
     monkeypatch.setattr(LLMHelper, "provider", property(lambda self: FakeProvider()))
 
     assert await helper.call_structured("chunk prompt") is None
+
+def test_duplicates_that_differ_only_by_whitespace_are_removed():
+    # AI output is not whitespace-normalised, so the comparison must be.
+    from cleaning.dataset_cleaner import remove_duplicate_records
+
+    kept, removed = remove_duplicate_records(
+        [
+            {"prompt": "q1", "response": "a1"},
+            {"prompt": "q1 ", "response": " a1\n"},
+            {"prompt": "q2", "response": "a2"},
+        ]
+    )
+    assert removed == 1
+    assert [r["prompt"] for r in kept] == ["q1", "q2"]

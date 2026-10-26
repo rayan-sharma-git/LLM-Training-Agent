@@ -432,3 +432,29 @@ def test_save_pipeline_snapshot_excludes_cleaning_summary():
     assert snapshot is not None
     assert "dataset" in snapshot["analyzers"]
     assert "dataset_cleaning" not in snapshot["analyzers"]
+
+# ----------------------------------------------------------------------
+# Chat context survives a backend restart
+# ----------------------------------------------------------------------
+
+def test_snapshot_is_rebuilt_from_a_stored_run():
+    from chat.store import snapshot_from_stored_run
+
+    run = {
+        "context": {"project_name": "demo", "project_path": "/p"},
+        "report": {"summary": "ok"},
+        "recommendations": [{"title": "Lower the learning rate"}],
+        "results": {"dataset": {"records": 9}, "prediction": {"hours": 2}, "cost": {"usd": 0}},
+    }
+    snapshot = snapshot_from_stored_run(run)
+    assert snapshot["context"]["project_name"] == "demo"
+    assert snapshot["analyzers"] == {"dataset": {"records": 9}}
+    assert snapshot["prediction"] == {"hours": 2} and snapshot["cost"] == {"usd": 0}
+    assert snapshot["recommendations"][0]["title"] == "Lower the learning rate"
+
+
+def test_a_stored_run_without_context_gives_no_snapshot():
+    from chat.store import snapshot_from_stored_run
+
+    assert snapshot_from_stored_run({"context": None}) is None
+    assert snapshot_from_stored_run({}) is None

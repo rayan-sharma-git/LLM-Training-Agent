@@ -63,10 +63,32 @@
     }
   }
 
+  // A code block with a header: the language on the left, a Copy button on the
+  // right that copies just this snippet.
+  function appendCodeBlock(root, code, language) {
+    var wrapper = document.createElement('div');
+    wrapper.className = 'code-block';
+    var header = document.createElement('div');
+    header.className = 'code-header';
+    var lang = document.createElement('span');
+    lang.className = 'code-lang';
+    lang.textContent = language || 'code';
+    header.appendChild(lang);
+    header.appendChild(makeCopyButton('Copy', function () { return code; }));
+    wrapper.appendChild(header);
+    var pre = document.createElement('pre');
+    var codeEl = document.createElement('code');
+    codeEl.textContent = code;
+    pre.appendChild(codeEl);
+    wrapper.appendChild(pre);
+    root.appendChild(wrapper);
+  }
+
   function renderMarkdown(root, text) {
     var lines = String(text).split('\n');
     var listEl = null;
     var fenceLines = null;
+    var fenceLanguage = '';
 
     function closeList() {
       listEl = null;
@@ -86,12 +108,9 @@
         if (fenceLines === null) {
           closeList();
           fenceLines = [];
+          fenceLanguage = trimmed.slice(FENCE.length).trim();
         } else {
-          var pre = document.createElement('pre');
-          var codeEl = document.createElement('code');
-          codeEl.textContent = fenceLines.join('\n');
-          pre.appendChild(codeEl);
-          root.appendChild(pre);
+          appendCodeBlock(root, fenceLines.join('\n'), fenceLanguage);
           fenceLines = null;
         }
         return;
@@ -142,12 +161,38 @@
 
     // An unterminated fence still shows what it collected.
     if (fenceLines !== null && fenceLines.length) {
-      var tail = document.createElement('pre');
-      var tailCode = document.createElement('code');
-      tailCode.textContent = fenceLines.join('\n');
-      tail.appendChild(tailCode);
-      root.appendChild(tail);
+      appendCodeBlock(root, fenceLines.join('\n'), fenceLanguage);
     }
+  }
+
+  // ----- Copy buttons -------------------------------------------------------
+  // The extension writes to the clipboard (it always can; a webview may not),
+  // then confirms with a 'copied' message so the button can say so.
+  var copyButtons = {};
+  var copyCounter = 0;
+
+  function makeCopyButton(label, getText) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'copy-btn';
+    button.textContent = label;
+    var id = 'copy-' + (++copyCounter);
+    copyButtons[id] = { button: button, label: label };
+    button.addEventListener('click', function () {
+      vscode.postMessage({ command: 'copy', id: id, text: getText() });
+    });
+    return button;
+  }
+
+  function onCopied(id) {
+    var entry = copyButtons[id];
+    if (!entry) {
+      return;
+    }
+    entry.button.textContent = 'Copied ✓';
+    setTimeout(function () {
+      entry.button.textContent = entry.label;
+    }, 1500);
   }
 
   // ----- Messages ---------------------------------------------------------
@@ -178,6 +223,12 @@
       body.textContent = text;
     }
     div.appendChild(body);
+    if (role === 'assistant') {
+      var bar = document.createElement('div');
+      bar.className = 'message-actions';
+      bar.appendChild(makeCopyButton('Copy answer', function () { return String(text); }));
+      div.appendChild(bar);
+    }
     messagesEl.appendChild(div);
     scrollToEnd();
   }
@@ -265,6 +316,12 @@
             ? { confidence: message.confidence, refs: message.references }
             : undefined
         );
+        break;
+      case 'copied':
+        onCopied(message.id);
+        break;
+      case 'idle':
+        setBusy(false);
         break;
       case 'showActionCard':
         showActionCard(message.actionId, message.text, message.buttons);

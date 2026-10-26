@@ -136,6 +136,9 @@ export interface DependencyFlowCallbacks {
   withProgress: (title: string, fn: () => Promise<boolean>) => Promise<boolean> | Thenable<boolean>;
 }
 
+/** Reported by `installDependencies` when pip refuses to touch a system Python. */
+export const EXTERNALLY_MANAGED_ERROR = 'pip refused: this Python is externally managed (PEP 668)';
+
 /** Minimum Python version the bundled backend supports. */
 export const MIN_PYTHON_VERSION: readonly [number, number] = [3, 10];
 
@@ -182,10 +185,12 @@ export function installDependencies(options: {
     }
   });
 
+  let stderrTail = '';
   child.stderr?.on('data', (data: Buffer) => {
     const out = stripAnsiLocal(data.toString()).trimEnd();
     if (out) {
       outputChannel.appendLine(`[pip:stderr] ${out}`);
+      stderrTail = (stderrTail + '\n' + out).slice(-4000);
     }
   });
 
@@ -200,7 +205,10 @@ export function installDependencies(options: {
       outputChannel.appendLine('Dependency installation completed successfully.');
       onDone?.(true);
     } else {
-      const msg = `pip exited with code ${code}`;
+      // Homebrew/Debian/Ubuntu Pythons refuse system-wide installs (PEP 668).
+      const msg = /externally-managed-environment/i.test(stderrTail)
+        ? EXTERNALLY_MANAGED_ERROR
+        : `pip exited with code ${code}`;
       outputChannel.appendLine(msg);
       onDone?.(false, msg);
     }
@@ -444,6 +452,13 @@ function runPipInstall(options: {
         onDone: (success, error) => {
           if (!success) {
             outputChannel.appendLine(`Dependency installation failed: ${error ?? 'unknown error'}.`);
+            if (error === EXTERNALLY_MANAGED_ERROR) {
+              outputChannel.appendLine(
+                'This Python does not allow installing packages system-wide. Create a virtual environment ' +
+                  '(python -m venv .venv), install backend/requirements.txt into it, and set ' +
+                  '"llmTrainingAgent.pythonPath" to that environment\'s python.'
+              );
+            }
           }
           done(success);
         },
@@ -473,8 +488,10 @@ export async function ensureRuntimeDependencies(options: {
   backendMainPath: string;
   outputChannel: vscode.OutputChannel;
   callbacks: DependencyFlowCallbacks;
+  /** Install without asking first (the default for users; see llmTrainingAgent.autoInstallDependencies). */
+  autoInstall?: boolean;
 }): Promise<boolean> {
-  const { pythonExe, backendMainPath, outputChannel, callbacks } = options;
+  const { pythonExe, backendMainPath, outputChannel, callbacks, autoInstall } = options;
   const probe = await probePythonEnvironment({ pythonExe, backendMainPath });
   if (probe.status === 'ready') {
     return true;
@@ -518,20 +535,27 @@ export async function ensureRuntimeDependencies(options: {
   const manualCommand = check.manualCommand;
   const missingList = check.missing.length > 0 ? check.missing.join(', ') : 'required packages';
   outputChannel.appendLine(`Backend setup: ${check.message}`);
-  const pick = await callbacks.showPrompt(
-    `LLM Training Agent: backend needs packages (${missingList}). Install now?`,
-    { modal: false },
-    'Install Dependencies',
-    'Show Manual Command',
-    'Cancel'
-  );
-  if (pick === 'Show Manual Command') {
-    outputChannel.appendLine(`Manual install command: ${manualCommand}`);
-    outputChannel.show(true);
-    return false;
-  }
-  if (pick !== 'Install Dependencies') {
-    return false;
+  if (autoInstall) {
+    outputChannel.appendLine(`Backend setup: installing missing packages automatically (${missingList}).`);
+  } else {
+    const pick = await callbacks.showPrompt(
+      `LLM Training Agent needs a few Python packages before it can work (${missingList}). Install them now? ` +
+        'This runs pip with the extension\'s own list (backend/requirements.txt) and nothing else.',
+      // Modal on purpose: a corner toast fades after a few seconds, and a missed
+      // prompt looked like "the extension never offered to install anything".
+      { modal: true },
+      'Install Dependencies',
+      'Show Manual Command',
+      'Cancel'
+    );
+    if (pick === 'Show Manual Command') {
+      outputChannel.appendLine(`Manual install command: ${manualCommand}`);
+      outputChannel.show(true);
+      return false;
+    }
+    if (pick !== 'Install Dependencies') {
+      return false;
+    }
   }
   const installed = await callbacks.withProgress(
     'Installing backend dependencies...',

@@ -6,6 +6,7 @@ import { syncBackendConfig } from './services/backendSync';
 import { registerAnalyzerCommands } from './commands/analyzerCommands';
 import { registerChatCommands } from './commands/chatCommands';
 import { registerChangeCommands } from './commands/changeCommands';
+import { registerCleaningCommands } from './commands/cleaningCommands';
 import { registerTreeView } from './views/simpleTreeView';
 import { ChatWebviewProvider } from './views/chatWebviewProvider';
 import { SettingsWebviewProvider } from './views/settingsWebviewProvider';
@@ -134,6 +135,7 @@ export async function activate(context: vscode.ExtensionContext) {
     registerAnalyzerCommands(context, apiClient, settings, overviewProvider, chatProvider, ensureBackend, backendManager);
     registerChatCommands(context, apiClient, settings, ensureBackend);
     registerChangeCommands(context, apiClient, ensureBackend);
+    registerCleaningCommands(context, apiClient, settings, chatProvider, ensureBackend);
     context.subscriptions.push(
       vscode.commands.registerCommand('llmTrainingAgent.configureProvider', async () => {
         await settingsProvider.reveal();
@@ -220,6 +222,13 @@ export async function activate(context: vscode.ExtensionContext) {
       }
     );
     context.subscriptions.push(viewReportCmd);
+    // Prepare the backend as soon as the user opens the extension, so the
+    // one-time "install the Python packages?" prompt appears right away rather
+    // than on their first message. Runs in the background; failures are
+    // reported by ensureBackend itself.
+    void ensureBackend().catch((error) => {
+      console.error('Backend preparation failed:', error instanceof Error ? error.message : String(error));
+    });
   } catch (error) {
     vscode.window.showErrorMessage(`Failed to activate LLM Training Agent: ${formatError(error)}`);
     console.error('Extension activation failed:', error);

@@ -1,52 +1,50 @@
 # Uninstall and Cleanup
 
-How to remove the LLM Training Agent extension and its leftover files.
+How to remove the extension and the files it leaves behind.
 
-## 1. Uninstall from VS Code
+## 1. Uninstall the extension
 
-1. Open the Extensions view (`Ctrl+Shift+X` on Windows/Linux, `Cmd+Shift+X` on macOS).
-2. Find **LLM Training Agent**, click the gear icon, choose **Uninstall**.
-3. Choose **Reload Window** when prompted.
+1. Open Extensions (`Ctrl+Shift+X`).
+2. Find **LLM Training Agent**, click the gear icon, and choose **Uninstall**.
+3. Choose **Reload Window**.
 
-Alternatively, run `code --uninstall-extension rayansharma.llm-training-agent` if the `code` command is on your PATH.
+Or, from a terminal: `code --uninstall-extension rayansharma.llm-training-agent`
 
-### Where the installed extension lives (Windows)
+## 2. Delete leftover extension files (Windows)
 
-The usual Windows location is:
+VS Code normally removes the extension's folder. If it is still there, delete **only** that one folder:
 
 ```
-C:\Users\<your-Windows-username>\.vscode\extensions\
+C:\Users\<your-name>\.vscode\extensions\
 ```
 
-To find it:
+1. Open File Explorer, then `C:` → `Users` → your account folder.
+2. Open `.vscode` → `extensions`.
+3. Delete the folder whose name starts with `rayansharma.llm-training-agent`.
 
-1. Open File Explorer.
-2. Open the C: drive, then `Users`, then the folder named after your Windows account.
-3. Look for `.vscode`, open `extensions`, and find the folder belonging to **LLM Training Agent**.
-4. If that extension folder remains after uninstalling it through VS Code, delete only that specific folder.
+Do not delete the whole `.vscode` folder or other extensions' folders. If you cannot find it, there is nothing to delete. (On macOS and Linux the folder is `~/.vscode/extensions/`.)
 
-This is the **usual location**, not a guaranteed location on every computer. Do not delete the entire `.vscode` folder or any other extension's folder. If `.vscode` is not there, leave everything as it is — there is nothing further to delete here.
+## 3. Delete the data it created
 
-## 2. Delete leftover files
+Delete only what you no longer need.
 
-Uninstalling removes the extension itself, but not the files below. Delete only what you no longer need.
-
-| File or folder | Location | Safe to delete? |
+| What | Where | Notes |
 |---|---|---|
-| `llm_training_agent.db`, `llm_training_agent.db-wal`, `llm_training_agent.db-shm`, `allowed-roots.txt` | Extension global storage (the exact path is chosen by VS Code; search your user profile for `allowed-roots.txt` — its folder is the location, with `llm_training_agent.db` beside it). Close VS Code first. | Yes, if you no longer need your analysis history. They are recreated on next use. |
-| `.llm_training_agent/`, `.llm_training_agent_backups/` | Inside each analyzed project folder (proposed changes and backups of applied changes). | Yes, once you no longer need pending proposals or rollback of applied changes. |
-| `.llm-training-agent/` | Inside each analyzed project folder (dataset-cleaning output; your original files are never modified). | Yes, if you no longer need the cleaned copies. |
-| API keys | Settings view → **Remove API Key** for each provider, before uninstalling. | Yes. Do not edit the OS credential store by hand. |
-| `llmTrainingAgent.*` settings | VS Code user settings (`Ctrl+,`, search `llmTrainingAgent`, Reset Setting). | Yes, optional. They do nothing once uninstalled. |
+| Analysis history: `llm_training_agent.db` (and `-wal`, `-shm`) and `allowed-roots.txt` | VS Code's storage for the extension. Search your user profile for `allowed-roots.txt`; its folder is the one. | Close VS Code first. They are recreated if you use it again. |
+| Pending changes and backups | `.llm_training_agent/` and `.llm_training_agent_backups/` inside each project you analyzed | Deleting the backups removes your ability to roll back applied changes. |
+| Cleaned datasets | `.llm-training-agent/` inside each project | Your original dataset files are never changed by this. |
+| API keys | In the extension's **Settings**, press **Remove API Key** for each provider, before uninstalling | Do not edit the system credential store by hand. |
+| Settings | `Ctrl+,`, search `llmTrainingAgent`, **Reset Setting** | Optional. They do nothing once uninstalled. |
 
-## 3. Optional permanent cleanup
+## 4. Optional
 
-If you will never use the extension again, also delete the downloaded `llm-training-agent-1.0.0.vsix` file. Python packages installed from `backend/requirements.txt` stay in your Python environment after uninstall — remove them with `pip uninstall` only if nothing else uses them.
+- Delete the downloaded `llm-training-agent-1.0.0.vsix`.
+- The Python packages the extension installed stay in your Python. Remove them with `pip uninstall` only if nothing else uses them.
 
-## 4. Files to keep
+## Keep these
 
-- **Your project source files.** The extension only changes them after your explicit approval.
-- **The repository's `backend/`, `extension/`, and `requirements.txt`.** These are source files, not installed state; keep them if you may reinstall.
-- **Everything belonging to other extensions or VS Code itself.** Touch only the files listed above.
+- Your own project files. The extension only changes them after you approve.
+- The repository's `backend/`, `extension/` and `requirements.txt`, if you may reinstall.
+- Anything that belongs to VS Code or other extensions.
 
-Chat history and logs live in memory only and disappear when VS Code closes — there is nothing to delete.
+Chat history is kept in memory only and disappears when VS Code closes, so there is nothing to delete.

@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ApiClient } from '../services/apiClient';
 import { formatError } from '../utils';
 import { buildChatHtml, createNonce } from './webviewHtml';
+import { ChatIntent, detectIntent } from '../services/chatIntents';
 
 /**
  * A WebviewViewProvider that renders a functional chat interface
@@ -31,6 +32,8 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
    */
   private _pending: Array<Record<string, unknown>> = [];
   private _webviewReady = false;
+  /** Runs actions the user asks for in chat (cleaning a dataset, analysing the project). */
+  private _intentHandler?: (intent: ChatIntent, text: string) => Promise<void>;
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -89,6 +92,16 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
             await this._handleSendMessage(text);
             break;
           }
+          case 'copy': {
+            // Clipboard access from inside a webview depends on browser
+            // permissions; the extension host can always write it.
+            const text = message.text;
+            if (typeof text === 'string' && text.length > 0 && text.length <= 1_000_000) {
+              await vscode.env.clipboard.writeText(text);
+              void webviewView.webview.postMessage({ command: 'copied', id: message.id });
+            }
+            break;
+          }
           case 'ready': {
             // The webview finished loading — replay persisted history, then
             // anything that was queued while it was not available.
@@ -118,6 +131,11 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
       null,
       this._disposables
     );
+  }
+
+  /** Register what happens when the user asks the chat to *do* something. */
+  public setIntentHandler(handler: (intent: ChatIntent, text: string) => Promise<void>): void {
+    this._intentHandler = handler;
   }
 
   /** Deliver now when the page is ready, otherwise queue until it is. */
@@ -193,6 +211,21 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         reply: true,
         text: `⚠️ ${reason}`,
       });
+
+    // "Remove duplicates from my dataset" is an instruction, not a question:
+    // perform it (with the user's consent at each step) instead of explaining.
+    const intent = this._intentHandler ? detectIntent(text) : null;
+    if (intent && this._intentHandler) {
+      // The action has its own prompts and progress, so release the page's
+      // "Thinking…" state now instead of leaving it up while the user decides.
+      this._post({ command: 'idle' });
+      try {
+        await this._intentHandler(intent, text);
+      } catch (error) {
+        fail(`That did not work: ${formatError(error)}`);
+      }
+      return;
+    }
 
     try {
       // Start the backend on first use rather than at activation.

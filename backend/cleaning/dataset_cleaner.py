@@ -13,9 +13,11 @@ This module therefore:
 5. writes a cleaned file per source file (same format, same relative path) plus
    a manifest, so the cleaned dataset can be reconstructed losslessly.
 
-Record-level guarantee: ``records_out == records_in`` per file, always.  A
-record is never dropped, merged, reordered or invented; on failure the original
-record is kept.
+Record-level guarantee: ``records_out + duplicates_removed == records_in`` per
+file, always.  By default nothing is removed (``duplicates_removed`` is 0), so
+``records_out == records_in``.  A record is never merged, reordered or invented,
+and is only ever dropped when the caller asked for duplicate removal and it is
+an exact copy of an earlier record; on failure the original record is kept.
 """
 from __future__ import annotations
 
@@ -93,6 +95,7 @@ class DatasetCleaner:
         max_files: int = 0,
         use_llm: bool = True,
         write_output: bool = True,
+        remove_duplicates: bool = False,
     ) -> DatasetCleaningResult:
         """Clean all discovered dataset files and return an aggregated result.
 
@@ -104,6 +107,10 @@ class DatasetCleaner:
             max_files: Optional cap on the number of files processed.
             use_llm: When False, only deterministic cleaning is applied.
             write_output: When False, records are processed in memory only.
+            remove_duplicates: When True, exact duplicate records (after
+                cleaning, keeping the first occurrence) are dropped.  This is a
+                plain script step, so it costs nothing even when *use_llm* is
+                True.
         """
         files, skipped = self.discover(context, max_files=max_files)
         project_root = Path(context.project_path) if context.project_path else Path(".")
@@ -135,9 +142,11 @@ class DatasetCleaner:
                 output_dir=target_dir,
                 use_llm=use_llm,
                 write_output=write_output,
+                remove_duplicates=remove_duplicates,
             )
             result.files.append(summary)
             result.total_records_out += summary.records_out
+            result.total_duplicates_removed += summary.duplicates_removed
             result.total_chunks += summary.chunks_total
             result.total_chunks_cleaned += summary.chunks_cleaned
             result.total_chunks_fallback += summary.chunks_fallback
@@ -150,6 +159,7 @@ class DatasetCleaner:
                     "format": summary.format,
                     "records_in": summary.records_in,
                     "records_out": summary.records_out,
+                    "duplicates_removed": summary.duplicates_removed,
                     "chunks": [c.model_dump() for c in summary.chunk_summaries],
                 }
             )
@@ -177,6 +187,7 @@ class DatasetCleaner:
                     "llm_used": llm_enabled,
                     "chunk_size": self.chunk_size,
                     "max_chunk_chars": self.max_chunk_chars,
+                    "remove_duplicates": remove_duplicates,
                     "records_preserved": result.records_preserved,
                     "cross_file_contamination": False,
                     "files": manifest_files,
@@ -198,6 +209,7 @@ class DatasetCleaner:
         output_dir: Optional[Path] = None,
         use_llm: bool = True,
         write_output: bool = True,
+        remove_duplicates: bool = False,
     ) -> Tuple[List[Dict[str, Any]], FileCleaningSummary]:
         """Clean one dataset file chunk by chunk.
 
@@ -255,8 +267,18 @@ class DatasetCleaner:
                 summary.chunks_fallback += 1
             cleaned_records.extend(cleaned_chunk)
 
+        if remove_duplicates:
+            cleaned_records, removed = remove_duplicate_records(cleaned_records)
+            summary.duplicates_removed = removed
+            if removed:
+                summary.warnings.append(
+                    f"{removed} duplicate record(s) removed from {path.name} (first copy kept)."
+                )
+
         summary.records_out = len(cleaned_records)
-        summary.records_preserved = len(cleaned_records) == len(records)
+        summary.records_preserved = (
+            len(cleaned_records) + summary.duplicates_removed == len(records)
+        )
         summary.llm_used = any(c.llm_used for c in summary.chunk_summaries)
 
         if not summary.records_preserved:
@@ -446,6 +468,32 @@ def _clean_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_clean_value(item) for item in value]
     return value
+
+
+def remove_duplicate_records(
+    records: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Drop exact duplicate records, keeping the first copy and the order.
+
+    Two records are duplicates when they hold the same keys and values (key
+    order is ignored; surrounding whitespace is ignored).  Works across chunk borders,
+    which the per-chunk LLM requests cannot do.
+    """
+    seen = set()
+    kept: List[Dict[str, Any]] = []
+    for record in records:
+        # Compare the script-cleaned form, so copies that differ only by stray
+        # whitespace or control characters count as duplicates in AI mode too
+        # (the model's output is not guaranteed to be whitespace-normalised).
+        try:
+            key = json.dumps(_clean_value(record), sort_keys=True, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            key = repr(record)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(record)
+    return kept, len(records) - len(kept)
 
 
 def count_empty_text_records(records: List[Dict[str, Any]]) -> int:

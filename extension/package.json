@@ -23,6 +23,7 @@
     "onView:llmTrainingAgent.settings",
     "onCommand:llmTrainingAgent.analyzeProject",
     "onCommand:llmTrainingAgent.analyzeDataset",
+    "onCommand:llmTrainingAgent.cleanDataset",
     "onCommand:llmTrainingAgent.openChat",
     "onCommand:llmTrainingAgent.viewReport",
     "onCommand:llmTrainingAgent.configureProvider",
@@ -83,6 +84,12 @@
         "icon": "$(database)"
       },
       {
+        "command": "llmTrainingAgent.cleanDataset",
+        "title": "Clean Dataset",
+        "category": "LLM Training Agent",
+        "icon": "$(sparkle)"
+      },
+      {
         "command": "llmTrainingAgent.openChat",
         "title": "Open Chat",
         "category": "LLM Training Agent",
@@ -125,6 +132,11 @@
           "group": "navigation"
         },
         {
+          "command": "llmTrainingAgent.cleanDataset",
+          "when": "view == llmTrainingAgent.overview",
+          "group": "navigation"
+        },
+        {
           "command": "llmTrainingAgent.viewChanges",
           "when": "view == llmTrainingAgent.overview",
           "group": "navigation"
@@ -136,6 +148,9 @@
         },
         {
           "command": "llmTrainingAgent.analyzeDataset"
+        },
+        {
+          "command": "llmTrainingAgent.cleanDataset"
         },
         {
           "command": "llmTrainingAgent.openChat"
@@ -187,6 +202,12 @@
           "default": "llama3.2",
           "scope": "application",
           "description": "LLM model name. User-level: it applies to every project and is never stored in a project."
+        },
+        "llmTrainingAgent.autoInstallDependencies": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Install the extension's Python packages (backend/requirements.txt only) automatically the first time they are missing. Turn off to be asked first."
         },
         "llmTrainingAgent.ollamaBaseUrl": {
           "type": "string",

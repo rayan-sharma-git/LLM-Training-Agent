@@ -1,50 +1,37 @@
 # Contributing
 
-Contributions are welcome.
-
-Before changing anything, read [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) so you know
-which file owns which responsibility.
+Contributions are welcome. Read [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) first: it shows which file does what.
 
 ## Ground rules
 
-- **Inspect before you change.** Understand how the existing code works and why it is
-  structured that way. This project has deliberate invariants (for example: extension
-  resources are resolved only from the extension install directory, never from the open
-  project) that tests enforce. Do not weaken them.
-- **Make focused changes.** One concern per pull request. A refactor bundled with a
-  feature is hard to review and hard to revert.
-- **Do not redesign the architecture.** Adding an analyzer, a provider or an endpoint
-  fits the existing patterns. Rewriting the layering does not belong in a contribution.
-- **Avoid unnecessary dependencies.** Every new package is a cost for every user. Prefer
-  the standard library or code already in the project.
-- **Do not break existing functionality.** If you change behaviour, keep the existing
-  tests passing or update them deliberately in the same commit.
-- **Keep the code clean.** No commented-out code, no stray debug prints, no duplicated
-  logic. Match the surrounding style.
-- **No fabricated numbers.** Analysis output must come from the user's project or from
-  a documented formula. If something cannot be determined, report it as unknown — do
-  not invent a plausible value, and do not add an LLM-generated accuracy score.
+- **Look before you change.** Understand why the code is built the way it is. Some rules are deliberate and tests enforce them. For example, the extension reads its own files only from its install folder, never from the open project. Do not weaken them.
+- **Keep changes small.** One concern per pull request. A refactor mixed with a feature is hard to review and hard to undo.
+- **Do not redesign.** Adding an analyzer, a provider or an endpoint fits the current patterns. Rewriting the structure does not belong in a contribution.
+- **Avoid new dependencies.** Every package is a cost for every user. Prefer the standard library or code already in the project.
+- **Do not break what works.** If behaviour changes, keep the tests passing or update them in the same commit.
+- **Keep the code clean.** No commented-out code, no stray debug prints, no duplicated logic. Match the style around it.
+- **Never invent numbers.** Results must come from the user's project or from a documented formula. If something cannot be known, say it is unknown, and never add an AI-generated accuracy score.
+
+## Setup
+
+- Python 3.10+. Install the root `requirements.txt` (it has the runtime packages plus the test and lint tools).
+- Node.js. Run `npm install` in `extension/`.
+- Press `F5` in VS Code to launch a test copy of the extension.
+
+There are two requirements files on purpose. `backend/requirements.txt` has only what is needed to **run** the extension. It is built into the VSIX and is what users get. The root `requirements.txt` is for **contributors**. When you add or change a dependency, update **both**.
 
 ## Before you open a pull request
 
-Run the tests for the part you touched.
+Run the tests for the part you changed.
 
 ```bash
-# Backend
-cd backend
-python -m pytest tests -q
-
-# Extension
-cd extension
-npm test          # vitest
-npm run lint      # tsc --noEmit
+cd backend   && python -m pytest tests -q
+cd extension && npm test && npm run lint
 ```
 
-Or use the shared VS Code tasks (`Terminal > Run Task`), which are wired to
-`venv310\Scripts\python.exe` and to `npm` inside `extension/`: **Backend: run tests**,
-**Extension: test**, **Extension: compile** and **Extension: package VSIX**.
+The shared VS Code tasks (**Terminal → Run Task**) do the same: **Backend: run tests**, **Extension: test**, **Extension: compile**, **Extension: package VSIX**.
 
-If you changed anything that ends up inside the VSIX, rebuild and re-audit it:
+If your change affects anything inside the VSIX, rebuild and audit it:
 
 ```bash
 cd extension
@@ -52,54 +39,36 @@ npm run package
 npm run verify:vsix
 ```
 
-Both commands must pass. The audit script exits non-zero if the package would ship
-secrets, caches, test files, or repository-relative path assumptions.
+Both must pass. The audit fails if the package would ship secrets, caches, test files or paths that only work on your machine, or if a required file is missing.
 
-`npm run package` builds the VSIX in `extension/` and then automatically promotes
-it to the **repository root** via the `postpackage` hook
-(`scripts/promote-vsix.js`), which copies the fresh file to
-`llm-training-agent-1.0.0.vsix` and removes the build-directory copy.
+`npm run package` builds the VSIX in `extension/`, then the `postpackage` hook (`scripts/promote-vsix.js`) copies it to the repository root as `llm-training-agent-1.0.0.vsix` and deletes the build copy. Keep exactly one copy, the root one. `extension/*.vsix` is git-ignored. Never commit it or copy it by hand.
 
-Keep exactly one copy: the root one. `extension/*.vsix` is git-ignored precisely
-because it is a transient build artifact — never commit it, and never hand-copy
-it. If a stale `extension/*.vsix` is lying around on disk, the next
-`npm run package` replaces it and re-promotes the root copy.
+## Update the docs
 
-## Update the documentation
-
-If your change alters user-facing behaviour, update the matching document in the same
-pull request:
+Change the matching document in the same pull request. All docs live at the repository root. Do not add copies elsewhere.
 
 | You changed | Update |
 |---|---|
-| A user-facing feature or command | [USER_MANUAL.md](USER_MANUAL.md) |
-| Installation or packaging | [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md), and the root VSIX |
-| File or folder layout | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) |
-| Uninstall behaviour or stored data | [DELETION.md](DELETION.md) |
-| Dependencies | `requirements.txt` **and** `backend/requirements.txt` |
-
-Do not create a second copy of any of these documents in a subdirectory. They live at
-the repository root.
+| A feature or command users see | [USER_MANUAL.md](USER_MANUAL.md) (and the Basics part of [README.md](README.md)) |
+| How it works inside | The Technical Details part of [README.md](README.md) |
+| Installing or packaging | [INSTALLATION_GUIDE.md](INSTALLATION_GUIDE.md), and rebuild the root VSIX |
+| The layout of files and folders | [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) |
+| What the extension stores or leaves behind | [DELETION.md](DELETION.md) |
+| A dependency | `requirements.txt` **and** `backend/requirements.txt` |
 
 ## Workflow
 
-The normal GitHub flow:
-
 1. **Fork** the repository.
-2. **Branch** off `main` with a descriptive name (`fix/allowed-roots-cache`,
-   `add-anthropic-provider`).
+2. **Branch** from `main` with a clear name, like `fix/allowed-roots-cache` or `add-anthropic-provider`.
 3. **Commit** focused changes with clear messages.
-4. **Push** the branch to your fork.
-5. **Open a pull request** describing what changed, why, and how you verified it.
-
-Keep the branch up to date with `main` before opening the pull request.
+4. **Push** to your fork.
+5. **Open a pull request** that says what changed, why, and how you checked it. Update your branch from `main` first.
 
 ## Reporting bugs
 
 Open an issue with:
 
-- What you did, what you expected, and what happened instead.
-- Your OS and VS Code version.
-- The contents of the **LLM Training Agent: Backend** output channel, if the backend
-  was involved. It is safe to share: credentials are scrubbed from log output.
-- The relevant part of your project structure (file names, not your data).
+- what you did, what you expected, and what happened,
+- your OS and VS Code version,
+- the text of the **LLM Training Agent: Backend** output channel, if the backend was involved (secrets are removed from it, so it is safe to share),
+- the relevant file names in your project (not your data).

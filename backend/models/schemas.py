@@ -68,6 +68,8 @@ class FileCleaningSummary(BaseModel):
     format: str = "jsonl"
     records_in: int = 0
     records_out: int = 0
+    #: Exact duplicate records dropped (only when duplicate removal was requested).
+    duplicates_removed: int = 0
     chunks_total: int = 0
     chunks_cleaned: int = 0
     chunks_fallback: int = 0
@@ -89,6 +91,7 @@ class DatasetCleaningResult(BaseModel):
     total_files: int = 0
     total_records_in: int = 0
     total_records_out: int = 0
+    total_duplicates_removed: int = 0
     total_chunks: int = 0
     total_chunks_cleaned: int = 0
     total_chunks_fallback: int = 0

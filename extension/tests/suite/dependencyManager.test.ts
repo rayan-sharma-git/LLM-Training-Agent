@@ -40,10 +40,12 @@ import {
   probePythonEnvironment,
   ensureRuntimeDependencies,
 } from '../../src/services/dependencyManager';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import { EventEmitter } from 'events';
 import * as path from 'path';
 
 const mockExecFile = execFile as unknown as ReturnType<typeof vi.fn>;
+const mockSpawn = spawn as unknown as ReturnType<typeof vi.fn>;
 
 describe('parseRequirements', () => {
   it('parses simple requirements and strips versions', () => {
@@ -282,5 +284,97 @@ describe('ensureRuntimeDependencies', () => {
     });
     expect(ok).toBe(false);
     expect(showPrompt).toHaveBeenCalledOnce();
+  });
+
+  describe('automatic install (the default)', () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    // pip fake: finishes with `code`, optionally printing `stderr` first.
+    const fakePip = (code: number, stderr = '') => {
+      mockSpawn.mockImplementation(() => {
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        setImmediate(() => {
+          if (stderr) child.stderr.emit('data', Buffer.from(stderr));
+          child.emit('exit', code);
+        });
+        return child;
+      });
+    };
+    // Python answers "sqlalchemy missing" until pip has run, then "all present".
+    const pythonWithPackages = (installed: () => boolean) => {
+      mockExistsSync.mockReturnValue(true);
+      mockReadFileSync.mockReturnValue('fastapi==0.104.1\nsqlalchemy==2.0.23\n');
+      mockExecFile.mockImplementation((_py: string, args: string[], _opts: unknown, cb: (e: Error | null, out?: string) => void) => {
+        const snippet = String(args[args.length - 1]);
+        if (snippet.includes('sys.version_info')) {
+          cb(null, '3.12.0');
+          return;
+        }
+        cb(!installed() && snippet.includes('sqlalchemy') ? new Error('missing') : null);
+      });
+    };
+
+    it('installs backend/requirements.txt without asking, then re-checks', async () => {
+      let installed = false;
+      pythonWithPackages(() => installed);
+      mockSpawn.mockImplementation(() => {
+        installed = true;
+        const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        setImmediate(() => child.emit('exit', 0));
+        return child;
+      });
+      const showPrompt = vi.fn();
+      const ok = await ensureRuntimeDependencies({
+        pythonExe: 'python',
+        backendMainPath: path.join('C:', 'backend', 'main.py'),
+        outputChannel: channel(),
+        callbacks: { showPrompt, withProgress: async (_t, fn) => fn() },
+        autoInstall: true,
+      });
+      expect(ok).toBe(true);
+      expect(showPrompt).not.toHaveBeenCalled();
+      const args = mockSpawn.mock.calls[0][1] as string[];
+      expect(args.slice(0, 4)).toEqual(['-m', 'pip', 'install', '-r']);
+      // Only the bundled runtime list is ever installed, never the developer one.
+      expect(args[4]).toBe(path.join('C:', 'backend', 'requirements.txt'));
+    });
+
+    it('still asks first when automatic install is switched off', async () => {
+      pythonWithPackages(() => false);
+      const showPrompt = vi.fn().mockResolvedValue('Cancel');
+      const ok = await ensureRuntimeDependencies({
+        pythonExe: 'python',
+        backendMainPath: path.join('C:', 'backend', 'main.py'),
+        outputChannel: channel(),
+        callbacks: { showPrompt, withProgress: async (_t, fn) => fn() },
+        autoInstall: false,
+      });
+      expect(ok).toBe(false);
+      expect(showPrompt).toHaveBeenCalledOnce();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('explains the virtual-environment fix when pip refuses a system Python', async () => {
+      pythonWithPackages(() => false);
+      fakePip(1, 'error: externally-managed-environment\n× This environment is externally managed');
+      const lines: string[] = [];
+      const out = { appendLine: (l: string) => lines.push(l), show: vi.fn() } as unknown as import('vscode').OutputChannel;
+      const ok = await ensureRuntimeDependencies({
+        pythonExe: 'python3',
+        backendMainPath: path.join('C:', 'backend', 'main.py'),
+        outputChannel: out,
+        callbacks: { showPrompt: vi.fn(), withProgress: async (_t, fn) => fn() },
+        autoInstall: true,
+      });
+      expect(ok).toBe(false);
+      expect(lines.join('\n')).toContain('python -m venv');
+      expect(lines.join('\n')).toContain('llmTrainingAgent.pythonPath');
+    });
   });
 });
