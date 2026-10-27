@@ -21,6 +21,21 @@ describe('detectIntent: requests to act', () => {
     });
   }
 
+  for (const text of [
+    'merge the cleaned dataset into my dataset',
+    'Merge the cleaned dataset',
+    'use the cleaned dataset',
+    'apply the cleaned copies',
+    'replace my dataset with the cleaned one',
+    'discard the cleaned copies',
+    'delete the cleaned folder',
+    'I like the cleaned dataset, merge it',
+  ]) {
+    it(`"${text}" -> mergeCleaned`, () => {
+      expect(detectIntent(text)).toEqual({ kind: 'mergeCleaned' });
+    });
+  }
+
   it('recognises an analyze-project request', () => {
     expect(detectIntent('analyze my project')).toEqual({ kind: 'analyze' });
     expect(detectIntent('please analyze this project')).toEqual({ kind: 'analyze' });

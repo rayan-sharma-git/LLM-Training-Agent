@@ -1,32 +1,36 @@
 """Chunked, multi-file dataset cleaner backed by the configured AI provider.
 
-Why this module exists
-----------------------
-Dataset cleaning is a *batch* operation, but an LLM request must stay small.
-This module therefore:
+How it works
+------------
+Dataset cleaning is a *batch* operation, but an LLM request must stay small, so:
 
-1. discovers **every** dataset file of a project (not just the first one),
-2. splits each file into **small, deterministic chunks of records**,
-3. sends **one request per chunk** to the LLM (a chunk never mixes two files),
-4. validates every response against the chunk it came from and falls back to
-   deterministic cleaning whenever the model breaks the contract, and
-5. writes a cleaned file per source file (same format, same relative path) plus
-   a manifest, so the cleaned dataset can be reconstructed losslessly.
+1. every dataset file of a project is discovered,
+2. each file is split into small, ordered chunks of records,
+3. in AI mode each chunk is sent in its own request (a chunk never mixes files),
+4. every response is checked against the chunk it came from; if the model breaks
+   the contract the chunk falls back to plain script cleaning, and
+5. the cleaned file replaces the original (atomically), or - when the caller
+   asks for it - a copy is saved under ``.llm-training-agent/cleaned`` so it can
+   be reviewed and merged into the originals later.
 
-Record-level guarantee: ``records_out + duplicates_removed == records_in`` per
-file, always.  By default nothing is removed (``duplicates_removed`` is 0), so
-``records_out == records_in``.  A record is never merged, reordered or invented,
-and is only ever dropped when the caller asked for duplicate removal and it is
-an exact copy of an earlier record; on failure the original record is kept.
+Scripts (no AI, free) normalise whitespace and control characters and drop exact
+duplicates and empty / meaningless records. The AI additionally fixes typos and
+broken sentences and may flag a record that makes no sense at all for removal.
+
+Nothing else is written: no manifests, no logs.
+
+Count guarantee per file: ``records_out + duplicates_removed + junk_removed
+== records_in``.
 """
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
-from datetime import datetime, timezone
+import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ai.llm import LLMHelper
 from cleaning import dataset_io
@@ -43,7 +47,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CHUNK_SIZE = 25
 DEFAULT_MAX_CHUNK_CHARS = 12000
 DEFAULT_OUTPUT_DIR = ".llm-training-agent/cleaned"
-MANIFEST_NAME = "cleaning_manifest.json"
+#: Written by older versions; never created any more, removed when found.
+LEGACY_MANIFEST_NAME = "cleaning_manifest.json"
+
+ProgressCallback = Callable[[Dict[str, Any]], None]
 
 _CLEANING_PROMPT = ("cleaning", "dataset_cleaning.md")
 _CLEANING_SYSTEM_PROMPT = ("system", "dataset_cleaner.md")
@@ -95,47 +102,50 @@ class DatasetCleaner:
         max_files: int = 0,
         use_llm: bool = True,
         write_output: bool = True,
-        remove_duplicates: bool = False,
+        remove_duplicates: bool = True,
+        in_place: bool = True,
+        on_progress: Optional[ProgressCallback] = None,
     ) -> DatasetCleaningResult:
         """Clean all discovered dataset files and return an aggregated result.
 
         Args:
             context: Project context providing ``project_path`` and
                 ``dataset_paths`` (files and/or directories).
-            output_dir: Destination directory.  Defaults to
-                ``<project>/.llm-training-agent/cleaned``.
+            output_dir: Destination for copies when *in_place* is False.
+                Defaults to ``<project>/.llm-training-agent/cleaned``.
             max_files: Optional cap on the number of files processed.
-            use_llm: When False, only deterministic cleaning is applied.
+            use_llm: When False, only script cleaning is applied (free).
             write_output: When False, records are processed in memory only.
-            remove_duplicates: When True, exact duplicate records (after
-                cleaning, keeping the first occurrence) are dropped.  This is a
-                plain script step, so it costs nothing even when *use_llm* is
-                True.
+            remove_duplicates: Drop exact duplicate records (first copy kept).
+                A script step, so it costs nothing even in AI mode.
+            in_place: Rewrite the original files (default) instead of saving
+                copies into *output_dir*.
+            on_progress: Called with ``{file_index, file_total, file_name,
+                chunk_index, chunk_total}`` before every chunk.
         """
         files, skipped = self.discover(context, max_files=max_files)
         project_root = Path(context.project_path) if context.project_path else Path(".")
-        target_dir = self._resolve_output_dir(project_root, output_dir)
+        target_dir = None if in_place else self._resolve_output_dir(project_root, output_dir)
 
         result = DatasetCleaningResult(
             skipped_files=skipped,
-            output_directory=str(target_dir) if write_output else None,
+            output_directory=str(target_dir) if (write_output and target_dir) else None,
+            in_place=in_place,
             chunk_size=self.chunk_size,
             max_chunk_chars=self.max_chunk_chars,
         )
 
         llm_enabled = use_llm and self.llm_available
-        result.llm_used = llm_enabled
+        result.llm_used = False
         if use_llm and not llm_enabled:
             result.warnings.append(
-                "No AI provider available: deterministic cleaning was applied instead."
+                "No AI provider available: scripts were used instead."
             )
 
         if not files:
             result.warnings.append("No dataset files were discovered in this project.")
 
-        manifest_files: List[Dict[str, Any]] = []
-
-        for path in files:
+        for index, path in enumerate(files, start=1):
             _, summary = await self.clean_file(
                 path=path,
                 project_root=project_root,
@@ -143,59 +153,42 @@ class DatasetCleaner:
                 use_llm=use_llm,
                 write_output=write_output,
                 remove_duplicates=remove_duplicates,
+                in_place=in_place,
+                on_progress=(
+                    (lambda info, i=index: on_progress({**info, "file_index": i, "file_total": len(files)}))
+                    if on_progress
+                    else None
+                ),
             )
             result.files.append(summary)
             result.total_records_out += summary.records_out
             result.total_duplicates_removed += summary.duplicates_removed
+            result.total_junk_removed += summary.junk_removed
+            result.total_files_changed += 1 if summary.changed else 0
             result.total_chunks += summary.chunks_total
             result.total_chunks_cleaned += summary.chunks_cleaned
             result.total_chunks_fallback += summary.chunks_fallback
             result.warnings.extend(summary.warnings)
-            manifest_files.append(
-                {
-                    "source_file": summary.source_file,
-                    "relative_path": summary.relative_path,
-                    "output_path": summary.output_path,
-                    "format": summary.format,
-                    "records_in": summary.records_in,
-                    "records_out": summary.records_out,
-                    "duplicates_removed": summary.duplicates_removed,
-                    "chunks": [c.model_dump() for c in summary.chunk_summaries],
-                }
-            )
 
         result.total_files = len(result.files)
         result.total_records_in = sum(f.records_in for f in result.files)
         result.records_preserved = all(f.records_preserved for f in result.files)
+        result.llm_used = result.total_chunks_cleaned > 0
         # Chunks are always built from a single file, so files can never mix.
         result.cross_file_contamination = False
+        if llm_enabled and result.total_chunks and not result.total_chunks_cleaned:
+            result.warnings.append(
+                "The AI model did not return a usable answer for any chunk, so only "
+                "scripts were applied. Check the provider and key in Settings."
+            )
         if not result.records_preserved:
             result.confidence = "low"
-        elif result.total_files and llm_enabled:
+        elif result.total_files and result.llm_used:
             result.confidence = "high"
         elif result.total_files:
             result.confidence = "medium"
         else:
             result.confidence = "low"
-
-        if write_output and files:
-            manifest_path = target_dir / MANIFEST_NAME
-            self._write_manifest(
-                manifest_path,
-                {
-                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                    "llm_used": llm_enabled,
-                    "chunk_size": self.chunk_size,
-                    "max_chunk_chars": self.max_chunk_chars,
-                    "remove_duplicates": remove_duplicates,
-                    "records_preserved": result.records_preserved,
-                    "cross_file_contamination": False,
-                    "files": manifest_files,
-                    "skipped_files": skipped,
-                },
-            )
-            result.manifest_path = str(manifest_path)
-
         return result
 
     def _resolve_output_dir(self, project_root: Path, output_dir: Optional[str]) -> Path:
@@ -209,14 +202,15 @@ class DatasetCleaner:
         output_dir: Optional[Path] = None,
         use_llm: bool = True,
         write_output: bool = True,
-        remove_duplicates: bool = False,
+        remove_duplicates: bool = True,
+        in_place: bool = True,
+        on_progress: Optional[ProgressCallback] = None,
     ) -> Tuple[List[Dict[str, Any]], FileCleaningSummary]:
         """Clean one dataset file chunk by chunk.
 
         Returns the cleaned records (in original order) and a per-file summary.
-        The cleaned file is written to ``output_dir / <relative source path>``
-        when *write_output* is True, which keeps one source file mapped to
-        exactly one output file.
+        With *in_place* the cleaned records replace the source file; otherwise
+        they are written to ``output_dir / <relative source path>``.
         """
         path = Path(path)
         project_root = Path(project_root) if project_root else path.parent
@@ -232,25 +226,24 @@ class DatasetCleaner:
             errors=list(read_errors),
         )
 
-        empty_records = count_empty_text_records(records)
-        if empty_records:
-            summary.warnings.append(
-                f"{empty_records} record(s) have an empty prompt or response; kept unchanged."
-            )
-
         if not records:
             summary.records_out = 0
             summary.records_preserved = True
             if not read_errors:
-                summary.warnings.append("File contains no records.")
+                summary.warnings.append(f"{path.name}: the file contains no records.")
             return [], summary
 
         chunks = dataset_io.chunk_records(records, self.chunk_size, self.max_chunk_chars)
         summary.chunks_total = len(chunks)
 
         cleaned_records: List[Dict[str, Any]] = []
+        removed_by_model = 0
         # Chunks are produced from this file only -> records can never mix files.
         for index, chunk in enumerate(chunks, start=1):
+            if on_progress:
+                on_progress(
+                    {"file_name": path.name, "chunk_index": index, "chunk_total": len(chunks)}
+                )
             cleaned_chunk, chunk_summary = await self._clean_chunk(
                 chunk=chunk,
                 file_name=path.name,
@@ -259,6 +252,7 @@ class DatasetCleaner:
                 fmt=fmt,
                 use_llm=use_llm,
             )
+            removed_by_model += len(chunk) - len(cleaned_chunk)
             summary.chunk_summaries.append(chunk_summary)
             summary.warnings.extend(chunk_summary.warnings)
             if chunk_summary.llm_used:
@@ -267,31 +261,48 @@ class DatasetCleaner:
                 summary.chunks_fallback += 1
             cleaned_records.extend(cleaned_chunk)
 
+        # Script steps that run in both modes.
+        before = len(cleaned_records)
+        cleaned_records = [r for r in cleaned_records if not is_junk_record(r)]
+        junk = before - len(cleaned_records)
+        summary.junk_removed = junk + removed_by_model
+
         if remove_duplicates:
             cleaned_records, removed = remove_duplicate_records(cleaned_records)
             summary.duplicates_removed = removed
-            if removed:
-                summary.warnings.append(
-                    f"{removed} duplicate record(s) removed from {path.name} (first copy kept)."
-                )
 
         summary.records_out = len(cleaned_records)
         summary.records_preserved = (
-            len(cleaned_records) + summary.duplicates_removed == len(records)
+            len(cleaned_records) + summary.duplicates_removed + summary.junk_removed
+            == len(records)
         )
         summary.llm_used = any(c.llm_used for c in summary.chunk_summaries)
 
         if not summary.records_preserved:
             summary.errors.append(
                 f"Record count mismatch for {path.name}: "
-                f"{len(records)} in, {len(cleaned_records)} out"
+                f"{len(records)} in, {len(cleaned_records)} kept, "
+                f"{summary.duplicates_removed + summary.junk_removed} removed"
             )
+            return cleaned_records, summary  # never write a file whose count is off
 
-        if write_output and output_dir:
-            out_path = Path(output_dir) / relative_path
-            dataset_io.write_records(out_path, cleaned_records, fmt)
-            summary.output_path = str(out_path)
+        if not cleaned_records:
+            summary.warnings.append(
+                f"{path.name}: every record was empty or a duplicate, so the file was left unchanged."
+            )
+            summary.records_out = len(records)
+            summary.duplicates_removed = 0
+            summary.junk_removed = 0
+            return records, summary
 
+        if write_output:
+            if in_place:
+                summary.changed = _write_in_place(path, cleaned_records, fmt)
+            else:
+                out_path = Path(output_dir) / relative_path
+                _write_copy(path, out_path, cleaned_records, fmt)
+                summary.changed = True
+                summary.output_path = str(out_path)
         return cleaned_records, summary
 
     # ------------------------------------------------------------------
@@ -328,6 +339,7 @@ class DatasetCleaner:
                 merged = [
                     self._merge_record(original, cleaned)
                     for original, cleaned in zip(chunk, candidates)
+                    if not _is_flagged_for_removal(cleaned)
                 ]
                 summary.status = "cleaned"
                 summary.llm_used = True
@@ -399,6 +411,14 @@ class DatasetCleaner:
             )
             return None, warnings, False
 
+        flagged = sum(1 for item in candidates if _is_flagged_for_removal(item))
+        if flagged * 2 > len(chunk):
+            warnings.append(
+                f"Chunk {chunk_index}: the model wanted to remove {flagged} of {len(chunk)} "
+                "records, which is too many to trust; scripts were used for this chunk."
+            )
+            return None, warnings, False
+
         for note in payload.get("warnings", []) or []:
             if isinstance(note, str) and note.strip():
                 warnings.append(f"Chunk {chunk_index}: {note.strip()}")
@@ -412,12 +432,17 @@ class DatasetCleaner:
 
         Only keys that existed in the source record are updated; keys invented
         by the model are ignored and keys the model dropped keep their original
-        value, so a record can never lose fields.
+        value. A value the model blanked out is not accepted either, so the AI
+        can fix text but never erase it.
         """
         merged = dict(original)
         for key, value in cleaned.items():
-            if key in original:
-                merged[key] = value
+            if key not in original or key == REMOVE_FLAG:
+                continue
+            if _is_blank(value) and not _is_blank(original[key]):
+                merged[key] = _clean_value(original[key])
+                continue
+            merged[key] = value
         return merged
 
     # ------------------------------------------------------------------
@@ -442,11 +467,6 @@ class DatasetCleaner:
             return path.resolve().relative_to(project_root.resolve()).as_posix()
         except (ValueError, OSError):
             return path.name
-
-    def _write_manifest(self, path: Path, payload: Dict[str, Any]) -> None:
-        """Write the cleaning manifest describing how outputs were produced."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _clean_text(value: str) -> str:
@@ -520,3 +540,146 @@ def count_empty_text_records(records: List[Dict[str, Any]]) -> int:
         if not prompt.strip() or not response.strip():
             empty += 1
     return empty
+
+
+REMOVE_FLAG = "_remove"
+
+
+def _is_flagged_for_removal(item: Any) -> bool:
+    return isinstance(item, dict) and item.get(REMOVE_FLAG) is True
+
+
+def _is_blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+_PROMPT_KEYS = ("prompt", "instruction", "question", "input")
+_RESPONSE_KEYS = ("response", "completion", "output", "answer", "text")
+
+
+def _has_content(text: str) -> bool:
+    """True when *text* contains at least one letter or digit."""
+    return bool(re.search(r"\w", text))
+
+
+def _leaf_strings(value: Any) -> List[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [leaf for item in value.values() for leaf in _leaf_strings(item)]
+    if isinstance(value, list):
+        return [leaf for item in value for leaf in _leaf_strings(item)]
+    return []
+
+
+def is_junk_record(record: Dict[str, Any]) -> bool:
+    """True for a record a script can safely call meaningless.
+
+    That is: the prompt or the response field (when the record has one) is
+    empty or holds no letter or digit at all, or the whole record holds no
+    text and no number. Records with another layout (for example chat
+    ``messages``) are only dropped when they are completely empty.
+    """
+    for keys in (_PROMPT_KEYS, _RESPONSE_KEYS):
+        for key in keys:
+            if key in record and isinstance(record[key], str) and not _has_content(record[key]):
+                return True
+    leaves = _leaf_strings(record)
+    has_number = any(isinstance(v, (int, float)) and not isinstance(v, bool) for v in record.values())
+    return not has_number and not any(_has_content(leaf) for leaf in leaves)
+
+
+def _json_wrapper(path: Path) -> Optional[Dict[str, Any]]:
+    """The ``{"data": [...]}`` object of a .json source, so it keeps its shape."""
+    if path.suffix.lower() != ".json":
+        return None
+    try:
+        data = json.loads(dataset_io.read_text(path))
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return data
+    return None
+
+
+def _write_in_place(path: Path, records: List[Dict[str, Any]], fmt: str) -> bool:
+    """Replace *path* with *records*; True when its content changed."""
+    wrapper = _json_wrapper(path)
+    if wrapper is None:
+        return dataset_io.write_records_atomic(path, records, fmt)
+    tmp = path.with_name(f".{path.name}.tmp-write")
+    try:
+        tmp.write_text(json.dumps({**wrapper, "data": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+        if path.read_bytes() == tmp.read_bytes():
+            return False
+        os.replace(tmp, path)
+        return True
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _write_copy(source: Path, target: Path, records: List[Dict[str, Any]], fmt: str) -> None:
+    wrapper = _json_wrapper(source)
+    if wrapper is None:
+        dataset_io.write_records(target, records, fmt)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({**wrapper, "data": records}, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ----------------------------------------------------------------------
+# Separate-folder copies: list, merge into the originals, discard
+# ----------------------------------------------------------------------
+
+
+def cleaned_copies_dir(project_root: str) -> Path:
+    return resolve_output_dir(project_root, None, DEFAULT_OUTPUT_DIR)
+
+
+def list_cleaned_copies(project_root: str) -> List[str]:
+    """Project-relative paths of cleaned copies waiting to be merged."""
+    folder = cleaned_copies_dir(project_root)
+    if not folder.is_dir():
+        return []
+    return sorted(
+        f.relative_to(folder).as_posix()
+        for f in folder.rglob("*")
+        if f.is_file() and dataset_io.is_dataset_file(f) and f.name != LEGACY_MANIFEST_NAME
+    )
+
+
+def _remove_internal_folder(folder: Path) -> None:
+    shutil.rmtree(folder, ignore_errors=True)
+    parent = folder.parent
+    try:
+        if parent.name == dataset_io.INTERNAL_DIR_NAME and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+
+def merge_cleaned_copies(project_root: str) -> List[str]:
+    """Replace the originals with the cleaned copies, then delete the copies folder."""
+    root = Path(project_root).resolve()
+    folder = cleaned_copies_dir(project_root)
+    merged: List[str] = []
+    for rel in list_cleaned_copies(project_root):
+        target = (root / rel).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(folder / rel, target)
+        merged.append(rel)
+    _remove_internal_folder(folder)
+    return merged
+
+
+def discard_cleaned_copies(project_root: str) -> int:
+    """Delete the cleaned copies without touching the originals."""
+    folder = cleaned_copies_dir(project_root)
+    count = len(list_cleaned_copies(project_root))
+    _remove_internal_folder(folder)
+    return count

@@ -1,19 +1,10 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
 import { ApiClient } from '../services/apiClient';
 import { SettingsManager } from '../services/settings';
 import { ChatWebviewProvider } from '../views/chatWebviewProvider';
 import { requireProjectRoot } from '../services/projectRoot';
-import { runCleaningFlow, CleaningDeps } from '../services/cleaningFlow';
+import { runCleaningFlow, runMergeFlow, CleaningDeps } from '../services/cleaningFlow';
 import { runEditFlow, EditDeps } from '../services/editFlow';
-
-async function readText(file: string): Promise<string | undefined> {
-  try {
-    return await fs.promises.readFile(file, 'utf8');
-  } catch {
-    return undefined;
-  }
-}
 
 /** Wire the cleaning flow to VS Code and the chat view. */
 export function createCleaningDeps(
@@ -36,14 +27,19 @@ export function createCleaningDeps(
     },
     say: (text) => chat.postAssistantMessage(text),
     withProgress: (title, task) =>
-      Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title }, () => task())),
-    clean: (options) => apiClient.cleanDatasets(options),
-    readText,
-    propose: (relativePath, content, root, reason) =>
-      apiClient.proposeFileChange(relativePath, content, root, 'modify', reason),
-    openChanges: async () => {
-      await vscode.commands.executeCommand('llmTrainingAgent.viewChanges');
-    },
+      Promise.resolve(
+        vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Notification, title, cancellable: true },
+          (progress, token) => task((message) => progress.report({ message }), () => token.isCancellationRequested)
+        )
+      ),
+    clean: (options, onProgress, isCancelled) =>
+      options.useLlm
+        ? apiClient.runCleaning(options, onProgress, isCancelled)
+        : apiClient.cleanDatasets(options),
+    pendingCopies: (root) => apiClient.pendingCleanedCopies(root),
+    mergeCopies: (root) => apiClient.mergeCleanedCopies(root),
+    discardCopies: (root) => apiClient.discardCleanedCopies(root),
     providerLabel: () => {
       const current = settings.getSettings();
       return `${current.provider} / ${current.model}`;
@@ -73,7 +69,9 @@ export function createEditDeps(
     ask: base.ask,
     say: base.say,
     withProgress: base.withProgress,
-    openChanges: base.openChanges,
+    openChanges: async () => {
+      await vscode.commands.executeCommand('llmTrainingAgent.viewChanges');
+    },
     providerLabel: base.providerLabel,
   };
 }
@@ -96,8 +94,17 @@ export function registerCleaningCommands(
     })
   );
 
+  context.subscriptions.push(
+    vscode.commands.registerCommand('llmTrainingAgent.mergeCleanedDataset', async () => {
+      await chat.reveal().then(undefined, () => undefined);
+      await runMergeFlow(deps);
+    })
+  );
+
   chat.setIntentHandler(async (intent) => {
-    if (intent.kind === 'clean') {
+    if (intent.kind === 'mergeCleaned') {
+      await runMergeFlow(deps);
+    } else if (intent.kind === 'clean') {
       await runCleaningFlow(deps, { removeDuplicates: intent.removeDuplicates ? true : undefined });
     } else if (intent.kind === 'edit') {
       await runEditFlow(editDeps, { file: intent.file, instruction: intent.instruction });

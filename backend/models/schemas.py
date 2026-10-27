@@ -70,6 +70,10 @@ class FileCleaningSummary(BaseModel):
     records_out: int = 0
     #: Exact duplicate records dropped (only when duplicate removal was requested).
     duplicates_removed: int = 0
+    #: Empty, meaningless or (in AI mode) model-flagged records that were dropped.
+    junk_removed: int = 0
+    #: True when the file on disk was actually rewritten.
+    changed: bool = False
     chunks_total: int = 0
     chunks_cleaned: int = 0
     chunks_fallback: int = 0
@@ -87,11 +91,14 @@ class DatasetCleaningResult(BaseModel):
     files: List[FileCleaningSummary] = []
     skipped_files: List[str] = []
     output_directory: Optional[str] = None
-    manifest_path: Optional[str] = None
+    #: True when the original files were rewritten; False when copies were saved.
+    in_place: bool = True
     total_files: int = 0
     total_records_in: int = 0
     total_records_out: int = 0
     total_duplicates_removed: int = 0
+    total_junk_removed: int = 0
+    total_files_changed: int = 0
     total_chunks: int = 0
     total_chunks_cleaned: int = 0
     total_chunks_fallback: int = 0

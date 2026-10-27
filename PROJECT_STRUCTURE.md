@@ -46,7 +46,7 @@ A FastAPI app that does all the analysis, storage and AI calls.
 | `prediction/`, `recommendation/`, `reports/` | Risks, prioritised actions, report text |
 | `hardware/` | GPU detection, time and VRAM math |
 | `ai/` | Provider interface, LLM helper, `providers/` (one file per provider), prompt templates |
-| `cleaning/` | Dataset cleaning in chunks (scripts or AI), duplicate removal |
+| `cleaning/` | Dataset cleaning in chunks (scripts or AI), in place or into copies, merge/discard, background jobs (`jobs.py`) |
 | `chat/` | Chat answers and per-project history |
 | `editing/` | `file_editor.py` (PROPOSED → APPROVED → APPLIED) and `assistant.py` (asks the AI to rewrite one file) |
 | `experiments/` | Experiment tracking (API only, no view yet) |
@@ -110,7 +110,7 @@ A FastAPI app that does all the analysis, storage and AI calls.
 - Settings (`llmTrainingAgent.*`): VS Code user settings.
 - Database (`llm_training_agent.db`) and `allowed-roots.txt`: VS Code global storage for the extension.
 - Pending changes and backups: `<project>/.llm_training_agent/` and `<project>/.llm_training_agent_backups/`.
-- Cleaned datasets: `<project>/.llm-training-agent/cleaned/`.
+- Cleaned copies (only until merged or discarded): `<project>/.llm-training-agent/cleaned/`.
 
 ## Conventions
 

@@ -76,24 +76,21 @@ If no AI provider is set up, or the provider fails, the chat tells you why. For 
 
 Cleans every dataset file in your project (`.jsonl`, `.json`, `.csv` and similar). Start it from the chat, or run `LLM Training Agent: Clean Dataset`, or use the button in Overview.
 
-The agent asks you:
-
-**How should I clean it?**
+The agent asks you how to clean:
 
 | Choice | What happens | Cost |
 |---|---|---|
-| **Use scripts** | Fixes extra whitespace and control characters. Nothing leaves your computer. | Free |
-| **Use the AI model** | Sends the data to your provider in small chunks, so it can also fix typos and formatting. | Free with Ollama. With a paid API it uses your credits, so use it with care on big datasets. |
+| **Use scripts** | Fixes whitespace and control characters and removes duplicate, empty and meaningless records. Your dataset files are edited directly. Nothing else is created. | Free |
+| **Use the AI model** | Does all of that, and also reads every record: it fixes typos and broken sentences and removes what makes no sense. Data is sent to your provider in small chunks. | Free with Ollama. With a paid API it uses your credits, so use it with care on big datasets. |
 
-**Remove duplicate records?** Removes exact copies and keeps the first. This is a script step, so it is free in both modes. (If you already said "duplicates" in your message, it does not ask again.)
+With the AI model it also asks **where to put the result**:
 
-Then the agent:
+- **Separate folder (safer).** Cleaned copies are saved in `.llm-training-agent/cleaned/` and your files stay as they are. Then choose **Merge into my dataset** (your files are replaced with the cleaned ones and that folder is deleted), **Keep them for now**, or **Discard them**.
+- **Change my files directly.** Your dataset files are overwritten right away. This cannot be undone.
 
-1. cleans the data and shows a summary, for example `10 in → 8 out (2 duplicates removed)`,
-2. puts the cleaned versions in `.llm-training-agent/cleaned/`,
-3. prepares each changed file as a proposal. Choose **Review changes** to see the difference (section 8) and apply it.
+If you kept the copies, say **"merge the cleaned dataset"** in the chat (or run `LLM Training Agent: Merge Cleaned Dataset`) whenever you decide you like them. "Discard the cleaned copies" removes them instead.
 
-Your original files are never overwritten without your approval. No record is lost: records out plus duplicates removed always equals records in. A file that is already clean is left alone. A file too big to review (over 2,000,000 characters) stays as a cleaned copy for you to copy over yourself.
+A long AI run shows what it is working on (file and part), can be cancelled from the notification, and does not time out. When it ends you get a summary such as `10 in → 8 out (removed 2 duplicates)`. No record is lost silently: a file whose numbers do not add up is left unchanged. A file that is already clean is not touched.
 
 ## 7. Analyze Dataset
 
@@ -140,7 +137,7 @@ Settings are user-level, so they are never saved inside your project: `llmTraini
 |---|---|
 | Analysis history (`llm_training_agent.db`) | VS Code global storage for the extension |
 | Pending changes and backups | `.llm_training_agent/` and `.llm_training_agent_backups/` inside your project |
-| Cleaned datasets | `.llm-training-agent/cleaned/` inside your project |
+| Cleaned copies (only if you chose the separate folder; removed by merge or discard) | `.llm-training-agent/cleaned/` inside your project |
 
 See [DELETION.md](DELETION.md) to clean these up.
 

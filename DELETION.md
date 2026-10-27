@@ -32,7 +32,7 @@ Delete only what you no longer need.
 |---|---|---|
 | Analysis history: `llm_training_agent.db` (and `-wal`, `-shm`) and `allowed-roots.txt` | VS Code's storage for the extension. Search your user profile for `allowed-roots.txt`; its folder is the one. | Close VS Code first. They are recreated if you use it again. |
 | Pending changes and backups | `.llm_training_agent/` and `.llm_training_agent_backups/` inside each project you analyzed | Deleting the backups removes your ability to roll back applied changes. |
-| Cleaned datasets | `.llm-training-agent/` inside each project | Your original dataset files are never changed by this. |
+| Leftover cleaned copies | `.llm-training-agent/` inside each project | Only exists if you saved AI-cleaned copies and never merged or discarded them. Your dataset files are not affected. |
 | API keys | In the extension's **Settings**, press **Remove API Key** for each provider, before uninstalling | Do not edit the system credential store by hand. |
 | Settings | `Ctrl+,`, search `llmTrainingAgent`, **Reset Setting** | Optional. They do nothing once uninstalled. |
 

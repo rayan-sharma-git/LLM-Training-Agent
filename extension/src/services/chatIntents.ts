@@ -10,6 +10,8 @@
 export type ChatIntent =
   | { kind: 'clean'; removeDuplicates: boolean }
   | { kind: 'analyze' }
+  /** Use (merge) or throw away the cleaned copies an earlier AI cleaning saved. */
+  | { kind: 'mergeCleaned' }
   /** Change one named file as instructed ("set the learning rate to 1e-4 in train.py"). */
   | { kind: 'edit'; file: string; instruction: string };
 
@@ -22,6 +24,9 @@ const QUESTION_START =
 const DATA_WORDS = /\b(?:data\s?sets?|data|records?|rows?|samples?|examples?|jsonl|csv|json|files?|training\s+set)\b/i;
 const CLEAN_VERBS = /\b(?:clean(?:\s?up)?|de-?dup(?:licate)?s?|dedupe|(?:remove|delete|erase|eliminate|drop)\s+(?:the\s+|all\s+|any\s+)*(?:duplicat\w*|dupes?)|get\s+rid\s+of\s+(?:the\s+)?(?:duplicat\w*|dupes?)|normali[sz]e|saniti[sz]e|fix)\b/i;
 const DUPLICATE_WORDS = /\b(?:de-?dup\w*|dedupe|duplicat\w*|dupes?)\b/i;
+const CLEANED_THING = /\bcleaned\s+(?:data\s?sets?|data|copies|copy|files?|versions?|folder|one)\b/i;
+const MERGE_VERBS = /^(?:merge|apply|use|accept|keep|replace|swap|approve|discard|delete|remove|throw\s+away|drop|reject)\b/i;
+const REPLACE_WITH_CLEANED = /\b(?:replace|overwrite)\b.*\b(?:my|the|original)\b.*\bdata\s?sets?\b.*\bcleaned\b/i;
 const ANALYZE_VERBS = /^(?:analy[sz]e|scan|inspect|review)\b/i;
 const PROJECT_WORDS = /\b(?:project|repo|repository|codebase|workspace|training\s+setup|fine-?tun\w*)\b/i;
 
@@ -39,6 +44,10 @@ export function detectIntent(rawText: string): ChatIntent | null {
   const core = text.replace(POLITE_PREFIX, '').trim();
   if (!core || QUESTION_START.test(core)) {
     return null;
+  }
+
+  if (((MERGE_VERBS.test(core) || /\bmerge\b/i.test(core)) && CLEANED_THING.test(core)) || REPLACE_WITH_CLEANED.test(core)) {
+    return { kind: 'mergeCleaned' };
   }
 
   if (ANALYZE_VERBS.test(core) && PROJECT_WORDS.test(core) && !DATA_WORDS.test(core.replace(PROJECT_WORDS, ''))) {

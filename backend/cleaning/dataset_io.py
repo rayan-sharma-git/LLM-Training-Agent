@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 from core.security import resolve_dataset_path as _resolve_workspace_dataset_path
@@ -175,6 +176,32 @@ def write_records(path: Path, records: List[Dict[str, Any]], fmt: str | None = N
         raise ValueError(f"Unsupported output format: '{fmt}'")
 
 
+def write_records_atomic(path: Path, records: List[Dict[str, Any]], fmt: str | None = None) -> bool:
+    """Write *records* over *path* safely; return True when the file changed.
+
+    The data goes to a temporary file next to the target first and replaces the
+    target only when it is complete, so a crash can never leave a half-written
+    dataset. When the new content is byte-identical the target is not touched.
+    """
+    tmp = path.with_name(f".{path.name}.tmp-write")
+    try:
+        write_records(tmp, records, fmt or detect_format(path))
+        if path.exists() and path.read_bytes() == tmp.read_bytes():
+            return False
+        os.replace(tmp, path)
+        return True
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
+#: Folder the extension uses for its own working files; never a dataset source.
+INTERNAL_DIR_NAME = ".llm-training-agent"
+
+
 def resolve_dataset_path(project_path: str | Path, dataset_path: str) -> Path:
     """Resolve a dataset path strictly inside the project root."""
     return _resolve_workspace_dataset_path(str(project_path), dataset_path)
@@ -201,6 +228,8 @@ def discover_dataset_files(
         if resolved.is_dir():
             for suffix in SUPPORTED_SUFFIXES:
                 for found in sorted(resolved.rglob(f"*{suffix}")):
+                    if INTERNAL_DIR_NAME in found.parts:
+                        continue
                     if found.is_file():
                         discovered.setdefault(str(found.resolve()), found)
         elif resolved.is_file():

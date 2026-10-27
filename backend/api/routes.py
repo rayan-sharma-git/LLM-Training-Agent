@@ -33,7 +33,13 @@ from scanner.scanner import ProjectScanner
 from scanner.context_builder import ContextBuilder
 from analyzers.dataset_analyzer import DatasetAnalyzer
 from analyzers.prompt_analyzer import PromptAnalyzer
-from cleaning.dataset_cleaner import DatasetCleaner
+from cleaning import jobs as cleaning_jobs
+from cleaning.dataset_cleaner import (
+    DatasetCleaner,
+    discard_cleaned_copies,
+    list_cleaned_copies,
+    merge_cleaned_copies,
+)
 from analyzers.hyperparameter_analyzer import HyperparameterAnalyzer
 from analyzers.model_advisor import ModelAdvisor
 from analyzers.cost_estimator import CostEstimator
@@ -592,7 +598,7 @@ async def _execute_analysis_pipeline(
     if clean_datasets and context.dataset_paths:
         try:
             cleaner = DatasetCleaner()
-            cleaning_result = await cleaner.clean_project(context)
+            cleaning_result = await cleaner.clean_project(context, write_output=False, in_place=False)
             results["dataset_cleaning"] = cleaning_result.model_dump()
             logger.info(
                 f"Dataset cleaning finished: {cleaning_result.total_files} file(s), "
@@ -974,100 +980,168 @@ async def analyze_dataset(request: Dict[str, Any]):
         )
 
 
+def _prepare_cleaning(request: Dict[str, Any]):
+    """Validate a cleaning request; return ``(cleaner, context, options)``."""
+    from pathlib import Path
+
+    project_path_value = request.get("projectPath")
+    dataset_paths = list(request.get("datasetPaths") or [])
+    if len(dataset_paths) > MAX_DATASET_ENTRIES:
+        raise HTTPException(status_code=422, detail={"errorCode": "INVALID_REQUEST", "message": "Too many dataset paths."})
+    if project_path_value:
+        project_path = str(resolve_workspace_root(str(project_path_value)))
+    else:
+        if not dataset_paths:
+            raise HTTPException(status_code=400, detail={"errorCode": "INVALID_REQUEST", "message": "projectPath or datasetPaths is required."})
+        first = Path(str(dataset_paths[0])).expanduser()
+        project_path = str(resolve_workspace_root(str(first.parent if first.is_absolute() else Path.cwd())))
+    if not Path(project_path).is_dir():
+        raise HTTPException(status_code=404, detail={"errorCode": "PROJECT_NOT_FOUND", "message": "Project directory was not found."})
+
+    if not dataset_paths:
+        # Discover dataset files with the same rules the scanner uses.
+        dataset_paths = ProjectScanner(project_path).discover_datasets()
+        if not dataset_paths:
+            raise HTTPException(
+                status_code=404,
+                detail={"errorCode": "NO_DATASETS", "message": "No dataset files were found in this project."},
+            )
+
+    chunk_size = bounded_int(request.get("chunkSize"), name="chunkSize", minimum=1, maximum=MAX_CHUNK_RECORDS, default=25)
+    max_chunk_chars = bounded_int(request.get("maxChunkChars"), name="maxChunkChars", minimum=200, maximum=MAX_CHUNK_CHARS, default=12000)
+    max_files = bounded_int(request.get("maxFiles"), name="maxFiles", minimum=0, maximum=MAX_DATASET_FILES, default=0)
+
+    cleaner = DatasetCleaner(chunk_size=chunk_size or 25, max_chunk_chars=max_chunk_chars or 12000)
+    context = ProjectContext(
+        project_name=Path(str(project_path)).name or "dataset_cleanup",
+        project_path=str(project_path),
+        dataset_paths=dataset_paths,
+    )
+    options = {
+        "output_dir": request.get("outputDirectory"),
+        "max_files": max_files,
+        "use_llm": _as_bool(request.get("useLlm"), True),
+        "remove_duplicates": _as_bool(request.get("removeDuplicates"), True),
+        "in_place": _as_bool(request.get("inPlace"), True),
+    }
+    return cleaner, context, options
+
+
+def _cleaning_http_error(e: Exception) -> HTTPException:
+    if isinstance(e, HTTPException):
+        return e
+    if isinstance(e, ValueError):
+        logger.warning("Dataset cleaning rejected an invalid path or parameter")
+        return HTTPException(status_code=400, detail={"errorCode": "INVALID_REQUEST", "message": str(e)})
+    logger.error(f"Dataset cleaning failed: {scrub_error(e)}", exc_info=True)
+    return HTTPException(
+        status_code=500,
+        detail={"errorCode": "CLEANING_FAILED", "message": "Dataset cleaning failed. See server logs for details."},
+    )
+
+
 @router.post("/dataset/clean", response_model=DatasetCleaningResult)
 async def clean_datasets(request: Dict[str, Any]):
-    """Clean every dataset file of a project in LLM-sized chunks.
+    """Clean every dataset file of a project and wait for the result.
 
-    Request body (all fields optional except a project or dataset reference):
+    Request body (all optional except a project or dataset reference):
 
     ```json
     {
       "projectPath": "/path/to/project",
-      "datasetPaths": ["data/train.jsonl", "data/val.jsonl"],
+      "datasetPaths": ["data/train.jsonl"],
+      "useLlm": true,
+      "inPlace": true,
+      "removeDuplicates": true,
       "chunkSize": 25,
       "maxChunkChars": 12000,
       "outputDirectory": ".llm-training-agent/cleaned",
-      "maxFiles": 0,
-      "useLlm": true,
-      "removeDuplicates": false
+      "maxFiles": 0
     }
     ```
 
-    * Every dataset file is discovered (a directory entry is expanded
-      recursively), then split into sequential chunks of ``chunkSize`` records
-      (and at most ``maxChunkChars`` characters).
-    * Each chunk is sent to the AI provider in its own request, so an entire
-      dataset is never sent in a single call.
-    * Cleaned files are written per source file, preserving the relative path
-      and format, together with a manifest for verification.  Every record of
-      every file is preserved; a chunk that fails validation keeps its original
-      records instead of losing data.
-    * ``useLlm: false`` cleans with plain scripts only (no AI calls, no cost).
-    * ``removeDuplicates: true`` additionally drops exact duplicate records
-      (first copy kept), with a script, in either mode.
+    * ``useLlm: false`` cleans with plain scripts (free): whitespace and control
+      characters, exact duplicates, empty or meaningless records.
+    * ``useLlm: true`` also lets the AI fix typos and broken sentences, one
+      small chunk per request.
+    * ``inPlace: true`` (default) rewrites the original files. ``false`` saves
+      copies under ``outputDirectory``; see ``/dataset/clean/merge``.
+    * Nothing else is written: no manifest, no logs.
+
+    For a long AI run use ``/dataset/clean/start`` and poll the job instead.
     """
     try:
-        from pathlib import Path
-
-        project_path_value = request.get("projectPath")
-        dataset_paths = list(request.get("datasetPaths") or [])
-        if len(dataset_paths) > MAX_DATASET_ENTRIES:
-            raise HTTPException(status_code=422, detail={"errorCode": "INVALID_REQUEST", "message": "Too many dataset paths."})
-        if project_path_value:
-            project_path = str(resolve_workspace_root(str(project_path_value)))
-        else:
-            if not dataset_paths:
-                raise HTTPException(status_code=400, detail={"errorCode": "INVALID_REQUEST", "message": "projectPath or datasetPaths is required."})
-            first = Path(str(dataset_paths[0])).expanduser()
-            project_path = str(resolve_workspace_root(str(first.parent if first.is_absolute() else Path.cwd())))
-        if not Path(project_path).is_dir():
-            raise HTTPException(status_code=404, detail={"errorCode": "PROJECT_NOT_FOUND", "message": "Project directory was not found."})
-
-        if not dataset_paths:
-            # Discover dataset files with the same rules the scanner uses.
-            scanner = ProjectScanner(project_path)
-            dataset_paths = scanner.discover_datasets()
-            if not dataset_paths:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No dataset files were found in this project.",
-                )
-
-        chunk_size = bounded_int(request.get("chunkSize"), name="chunkSize", minimum=1, maximum=MAX_CHUNK_RECORDS, default=25)
-        max_chunk_chars = bounded_int(request.get("maxChunkChars"), name="maxChunkChars", minimum=200, maximum=MAX_CHUNK_CHARS, default=12000)
-        max_files = bounded_int(request.get("maxFiles"), name="maxFiles", minimum=0, maximum=MAX_DATASET_FILES, default=0)
-
-        cleaner = DatasetCleaner(
-            chunk_size=chunk_size or 25,
-            max_chunk_chars=max_chunk_chars or 12000,
-        )
-
-        context = ProjectContext(
-            project_name=Path(str(project_path)).name or "dataset_cleanup",
-            project_path=str(project_path),
-            dataset_paths=dataset_paths,
-        )
-
-        logger.info(f"Cleaning {len(dataset_paths)} dataset entry(ies) of {project_path}")
-        result = await cleaner.clean_project(
-            context,
-            output_dir=request.get("outputDirectory"),
-            max_files=max_files,
-            use_llm=_as_bool(request.get("useLlm"), True),
-            remove_duplicates=_as_bool(request.get("removeDuplicates"), False),
-        )
-        return result
-    except HTTPException:
-        raise
-    except ValueError as e:
-        logger.warning("Dataset cleaning rejected an invalid path or parameter")
-        raise HTTPException(status_code=400, detail={"errorCode": "INVALID_REQUEST", "message": str(e)}) from e
+        cleaner, context, options = _prepare_cleaning(request)
+        logger.info(f"Cleaning {len(context.dataset_paths)} dataset entry(ies) of {context.project_path}")
+        return await cleaner.clean_project(context, **options)
     except Exception as e:
-        logger.error(f"Dataset cleaning failed: {scrub_error(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail={"errorCode": "CLEANING_FAILED", "message": "Dataset cleaning failed. See server logs for details."},
-        )
+        raise _cleaning_http_error(e) from e
+
+
+@router.post("/dataset/clean/start")
+async def start_dataset_cleaning(request: Dict[str, Any]):
+    """Start cleaning in the background; poll ``/dataset/clean/jobs/{jobId}``."""
+    try:
+        cleaner, context, options = _prepare_cleaning(request)
+    except Exception as e:
+        raise _cleaning_http_error(e) from e
+
+    async def run(report):
+        result = await cleaner.clean_project(context, on_progress=report, **options)
+        return result.model_dump()
+
+    job = cleaning_jobs.start_job(run, lambda exc: scrub_error(exc))
+    return {"jobId": job.id, "status": job.status}
+
+
+@router.get("/dataset/clean/jobs/{job_id}")
+async def get_cleaning_job(job_id: str):
+    job = cleaning_jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"errorCode": "JOB_NOT_FOUND", "message": "Unknown cleaning job."})
+    return job.snapshot()
+
+
+@router.delete("/dataset/clean/jobs/{job_id}")
+async def cancel_cleaning_job(job_id: str):
+    if not cleaning_jobs.cancel_job(job_id):
+        raise HTTPException(status_code=404, detail={"errorCode": "JOB_NOT_FOUND", "message": "Unknown cleaning job."})
+    return {"jobId": job_id, "status": "cancelled"}
+
+
+def _cleaned_copies_root(request: Dict[str, Any]) -> str:
+    value = request.get("projectPath")
+    if not value:
+        raise HTTPException(status_code=400, detail={"errorCode": "INVALID_REQUEST", "message": "projectPath is required."})
+    return str(resolve_workspace_root(str(value)))
+
+
+@router.post("/dataset/clean/pending")
+async def pending_cleaned_copies(request: Dict[str, Any]):
+    """List cleaned copies saved in the separate folder."""
+    try:
+        return {"files": list_cleaned_copies(_cleaned_copies_root(request))}
+    except Exception as e:
+        raise _cleaning_http_error(e) from e
+
+
+@router.post("/dataset/clean/merge")
+async def merge_cleaned(request: Dict[str, Any]):
+    """Replace the original datasets with the cleaned copies and delete the copies folder."""
+    try:
+        merged = merge_cleaned_copies(_cleaned_copies_root(request))
+        return {"merged": merged}
+    except Exception as e:
+        raise _cleaning_http_error(e) from e
+
+
+@router.post("/dataset/clean/discard")
+async def discard_cleaned(request: Dict[str, Any]):
+    """Delete the cleaned copies; the originals are not touched."""
+    try:
+        return {"discarded": discard_cleaned_copies(_cleaned_copies_root(request))}
+    except Exception as e:
+        raise _cleaning_http_error(e) from e
 
 
 @router.post("/prompt/analyze")

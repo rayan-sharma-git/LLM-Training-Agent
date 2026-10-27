@@ -188,7 +188,7 @@ async def test_cleaned_files_are_reconstructed_per_source_file(tmp_path):
     out_dir = tmp_path / "out"
 
     result = await cleaner.clean_project(
-        context_for(tmp_path, ["data"]), output_dir=str(out_dir)
+        context_for(tmp_path, ["data"]), output_dir=str(out_dir), in_place=False
     )
 
     train_out = out_dir / "data" / "train.jsonl"
@@ -205,14 +205,10 @@ async def test_cleaned_files_are_reconstructed_per_source_file(tmp_path):
     assert [r["id"] for r in train_records] == list(range(12))
 
     assert result.records_preserved is True
-    assert result.manifest_path is not None
-    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
-    assert manifest["records_preserved"] is True
-    assert {entry["relative_path"] for entry in manifest["files"]} == {
-        "data/train.jsonl",
-        "data/val.jsonl",
-    }
-    assert all(entry["records_in"] == entry["records_out"] for entry in manifest["files"])
+    # No manifest or log files are ever written next to the copies.
+    assert sorted(p.name for p in out_dir.rglob("*") if p.is_file()) == ["train.jsonl", "val.jsonl"]
+    # The originals were not touched in copy mode.
+    assert len(read_jsonl(tmp_path / "data" / "train.jsonl")) == 12
 
 
 @pytest.mark.asyncio
@@ -231,7 +227,7 @@ async def test_llm_output_values_are_applied_without_losing_fields(tmp_path):
     cleaner = DatasetCleaner(llm=llm, chunk_size=10)
 
     records, summary = await cleaner.clean_file(
-        path=tmp_path / "data" / "train.jsonl", write_output=False
+        path=tmp_path / "data" / "train.jsonl", write_output=False, remove_duplicates=False
     )
 
     assert len(records) == 2
@@ -294,8 +290,9 @@ async def test_no_provider_applies_deterministic_cleaning(tmp_path):
     assert result.llm_used is False
     assert llm.prompts == [], "no request may be sent when no provider is configured"
     assert result.records_preserved is True
-    cleaned = read_jsonl(tmp_path / ".llm-training-agent" / "cleaned" / "data" / "train.jsonl")
+    cleaned = read_jsonl(tmp_path / "data" / "train.jsonl")
     assert cleaned[0]["prompt"] == "Hello\n\nWorld"
+    assert not (tmp_path / ".llm-training-agent").exists()
     assert result.files[0].chunk_summaries[0].status == "deterministic"
     assert any("No AI provider" in w for w in result.warnings)
 
@@ -317,12 +314,12 @@ async def test_scripts_mode_never_calls_the_llm_even_when_one_is_available(tmp_p
     assert not any("No AI provider" in w for w in result.warnings)
 
 
-async def test_duplicates_are_kept_by_default(tmp_path):
+async def test_duplicates_can_be_kept_when_asked(tmp_path):
     records = make_records(3) + make_records(3)
     write_jsonl(tmp_path / "train.jsonl", records)
     cleaner = DatasetCleaner(llm=RecordingLLM(available=False), chunk_size=4)
 
-    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]))
+    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]), remove_duplicates=False)
 
     assert result.total_records_out == 6
     assert result.total_duplicates_removed == 0
@@ -339,7 +336,7 @@ async def test_remove_duplicates_drops_exact_copies_across_chunks_and_keeps_orde
         context_for(tmp_path, ["train.jsonl"]), use_llm=False, remove_duplicates=True
     )
 
-    cleaned = read_jsonl(tmp_path / ".llm-training-agent" / "cleaned" / "train.jsonl")
+    cleaned = read_jsonl(tmp_path / "train.jsonl")
     assert [r["id"] for r in cleaned] == [0, 1, 2, 3, 4, 99]
     summary = result.files[0]
     assert summary.records_in == 8 and summary.records_out == 6
@@ -359,6 +356,146 @@ async def test_remove_duplicates_is_a_script_step_in_llm_mode_too(tmp_path):
 
     assert len(llm.prompts) == 2, "the model still sees every chunk"
     assert result.total_records_out == 4 and result.total_duplicates_removed == 4
+
+
+# ----------------------------------------------------------------------
+# In-place cleaning, junk removal, AI removals, merge / discard
+# ----------------------------------------------------------------------
+
+async def test_scripts_rewrite_the_original_and_create_nothing_else(tmp_path):
+    rows = [
+        {"id": 1, "prompt": " a  ", "response": "b"},
+        {"id": 1, "prompt": "a", "response": "b"},
+        {"id": 2, "prompt": "???", "response": "c"},
+        {"id": 3, "prompt": "q", "response": "  "},
+        {"id": 4, "prompt": "ok", "response": "fine"},
+    ]
+    write_jsonl(tmp_path / "train.jsonl", rows)
+    cleaner = DatasetCleaner(llm=RecordingLLM(available=True))
+
+    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]), use_llm=False)
+
+    assert [r["id"] for r in read_jsonl(tmp_path / "train.jsonl")] == [1, 4]
+    file = result.files[0]
+    assert (file.records_in, file.records_out, file.duplicates_removed, file.junk_removed) == (5, 2, 1, 2)
+    assert result.records_preserved and file.changed and result.in_place
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["train.jsonl"], "no extra files or folders"
+
+
+async def test_already_clean_file_is_not_rewritten(tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(3))
+    before = (tmp_path / "train.jsonl").stat().st_mtime_ns
+    result = await DatasetCleaner().clean_project(context_for(tmp_path, ["train.jsonl"]), use_llm=False)
+    assert result.files[0].changed is False
+    assert (tmp_path / "train.jsonl").stat().st_mtime_ns == before
+
+
+async def test_json_wrapper_and_other_fields_survive_in_place(tmp_path):
+    (tmp_path / "d.json").write_text(
+        json.dumps({"name": "set", "data": [{"prompt": "a", "response": "b"}, {"prompt": "a", "response": "b"}]}),
+        encoding="utf-8",
+    )
+    await DatasetCleaner().clean_project(context_for(tmp_path, ["d.json"]), use_llm=False)
+    saved = json.loads((tmp_path / "d.json").read_text(encoding="utf-8"))
+    assert saved["name"] == "set" and len(saved["data"]) == 1
+
+
+async def test_chat_style_records_are_not_mistaken_for_junk(tmp_path):
+    rows = [{"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]}]
+    write_jsonl(tmp_path / "chat.jsonl", rows)
+    result = await DatasetCleaner().clean_project(context_for(tmp_path, ["chat.jsonl"]), use_llm=False)
+    assert result.total_junk_removed == 0 and len(read_jsonl(tmp_path / "chat.jsonl")) == 1
+
+
+async def test_ai_can_fix_text_and_remove_a_hopeless_record(tmp_path):
+    rows = make_records(6)
+    write_jsonl(tmp_path / "train.jsonl", rows)
+
+    def responder(chunk):
+        out = []
+        for r in chunk:
+            r = dict(r)
+            r["prompt"] = r["prompt"] + " fixed"
+            if r["id"] == 2:
+                r["_remove"] = True
+            out.append(r)
+        return {"records": out}
+
+    cleaner = DatasetCleaner(llm=RecordingLLM(responder=responder), chunk_size=6)
+    result = await cleaner.clean_project(context_for(tmp_path, ["train.jsonl"]), use_llm=True)
+
+    saved = read_jsonl(tmp_path / "train.jsonl")
+    assert [r["id"] for r in saved] == [0, 1, 3, 4, 5]
+    assert saved[0]["prompt"].endswith("fixed") and all("_remove" not in r for r in saved)
+    assert result.files[0].junk_removed == 1 and result.records_preserved and result.llm_used
+
+
+async def test_model_that_flags_most_records_is_not_trusted(tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(4))
+    llm = RecordingLLM(responder=lambda chunk: {"records": [{**r, "_remove": True} for r in chunk]})
+    result = await DatasetCleaner(llm=llm, chunk_size=4).clean_project(context_for(tmp_path, ["train.jsonl"]))
+    assert len(read_jsonl(tmp_path / "train.jsonl")) == 4
+    assert result.total_chunks_fallback == 1 and any("too many" in w for w in result.warnings)
+
+
+async def test_model_cannot_blank_out_a_field(tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(2))
+    llm = RecordingLLM(responder=lambda chunk: {"records": [{**r, "response": ""} for r in chunk]})
+    await DatasetCleaner(llm=llm).clean_project(context_for(tmp_path, ["train.jsonl"]))
+    assert [r["response"] for r in read_jsonl(tmp_path / "train.jsonl")] == ["answer 0", "answer 1"]
+
+
+async def test_progress_is_reported_per_chunk(tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(9))
+    seen = []
+    await DatasetCleaner(llm=RecordingLLM(), chunk_size=4).clean_project(
+        context_for(tmp_path, ["train.jsonl"]), on_progress=seen.append
+    )
+    assert [(p["chunk_index"], p["chunk_total"]) for p in seen] == [(1, 3), (2, 3), (3, 3)]
+    assert seen[0]["file_name"] == "train.jsonl" and seen[0]["file_index"] == 1
+
+
+async def test_copy_mode_then_merge_replaces_originals_and_removes_the_folder(tmp_path):
+    from cleaning.dataset_cleaner import list_cleaned_copies, merge_cleaned_copies
+
+    write_jsonl(tmp_path / "data" / "train.jsonl", make_records(3) + make_records(3))
+    await DatasetCleaner().clean_project(context_for(tmp_path, ["data"]), use_llm=False, in_place=False)
+    assert len(read_jsonl(tmp_path / "data" / "train.jsonl")) == 6, "original untouched in copy mode"
+    assert list_cleaned_copies(str(tmp_path)) == ["data/train.jsonl"]
+
+    assert merge_cleaned_copies(str(tmp_path)) == ["data/train.jsonl"]
+    assert len(read_jsonl(tmp_path / "data" / "train.jsonl")) == 3
+    assert not (tmp_path / ".llm-training-agent").exists()
+
+
+async def test_discard_removes_copies_and_keeps_originals(tmp_path):
+    from cleaning.dataset_cleaner import discard_cleaned_copies
+
+    write_jsonl(tmp_path / "train.jsonl", make_records(3) + make_records(3))
+    await DatasetCleaner().clean_project(context_for(tmp_path, ["train.jsonl"]), use_llm=False, in_place=False)
+    assert discard_cleaned_copies(str(tmp_path)) == 1
+    assert len(read_jsonl(tmp_path / "train.jsonl")) == 6
+    assert not (tmp_path / ".llm-training-agent").exists()
+
+
+def test_merge_ignores_a_leftover_manifest_from_older_versions(tmp_path):
+    from cleaning.dataset_cleaner import merge_cleaned_copies
+
+    old = tmp_path / ".llm-training-agent" / "cleaned"
+    write_jsonl(old / "train.jsonl", make_records(2))
+    (old / "cleaning_manifest.json").write_text("{}", encoding="utf-8")
+    write_jsonl(tmp_path / "train.jsonl", make_records(5))
+    merge_cleaned_copies(str(tmp_path))
+    assert len(read_jsonl(tmp_path / "train.jsonl")) == 2
+    assert not (tmp_path / "cleaning_manifest.json").exists()
+    assert not (tmp_path / ".llm-training-agent").exists()
+
+
+async def test_cleaned_folder_is_never_treated_as_a_dataset(tmp_path):
+    write_jsonl(tmp_path / "data" / "a.jsonl", make_records(2))
+    write_jsonl(tmp_path / ".llm-training-agent" / "cleaned" / "data" / "a.jsonl", make_records(2))
+    files, _ = dataset_io.discover_dataset_files(tmp_path, ["."])
+    assert [f.name for f in files] == ["a.jsonl"] and ".llm-training-agent" not in str(files[0])
 
 
 # ----------------------------------------------------------------------
@@ -386,6 +523,7 @@ def test_clean_endpoint_accepts_explicit_dataset_paths(api_client, tmp_path):
             "datasetPaths": [str(tmp_path / "train.jsonl")],
             "chunkSize": 4,
             "outputDirectory": str(out_dir),
+            "inPlace": False,
             "useLlm": False,
         },
     )
@@ -489,3 +627,38 @@ def test_duplicates_that_differ_only_by_whitespace_are_removed():
     )
     assert removed == 1
     assert [r["prompt"] for r in kept] == ["q1", "q2"]
+
+
+def test_background_job_reports_progress_and_result(api_client, tmp_path):
+    import time
+
+    write_jsonl(tmp_path / "train.jsonl", make_records(6) + make_records(6))
+    start = api_client.post(
+        "/api/v1/dataset/clean/start",
+        json={"projectPath": str(tmp_path), "useLlm": False},
+    )
+    assert start.status_code == 200
+    job_id = start.json()["jobId"]
+    for _ in range(50):
+        state = api_client.get(f"/api/v1/dataset/clean/jobs/{job_id}").json()
+        if state["status"] != "running":
+            break
+        time.sleep(0.1)
+    assert state["status"] == "done", state
+    assert state["result"]["total_duplicates_removed"] == 6
+    assert len(read_jsonl(tmp_path / "train.jsonl")) == 6
+    assert api_client.get("/api/v1/dataset/clean/jobs/nope").status_code == 404
+
+
+def test_merge_and_discard_endpoints(api_client, tmp_path):
+    write_jsonl(tmp_path / "train.jsonl", make_records(4) + make_records(4))
+    api_client.post(
+        "/api/v1/dataset/clean",
+        json={"projectPath": str(tmp_path), "useLlm": False, "inPlace": False},
+    )
+    pending = api_client.post("/api/v1/dataset/clean/pending", json={"projectPath": str(tmp_path)}).json()
+    assert pending["files"] == ["train.jsonl"]
+    merged = api_client.post("/api/v1/dataset/clean/merge", json={"projectPath": str(tmp_path)}).json()
+    assert merged["merged"] == ["train.jsonl"]
+    assert len(read_jsonl(tmp_path / "train.jsonl")) == 4
+    assert api_client.post("/api/v1/dataset/clean/discard", json={"projectPath": str(tmp_path)}).json() == {"discarded": 0}

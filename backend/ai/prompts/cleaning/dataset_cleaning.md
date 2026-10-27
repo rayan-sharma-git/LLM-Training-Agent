@@ -17,24 +17,25 @@ rest of the file.
 <<RECORDS_JSON>>
 ```
 
-## What to clean
+## What to do
 
-1. Trim leading/trailing whitespace from every string value.
-2. Normalise newlines (`\r\n` -> `\n`) and collapse runs of 3 or more blank lines to 2.
-3. Remove non-printable control characters (keep `\n`, `\t`).
-4. Fix obvious typos, doubled words and broken spacing inside prompt/response text.
-5. Make punctuation and capitalisation of prompt/response text internally consistent.
-6. Ensure every record keeps its original keys; keep the original wording and meaning.
+Clean every record thoroughly, the way a careful editor would:
 
-## Hard rules
+1. Trim whitespace, normalise newlines (`\r\n` -> `\n`), collapse runs of 3+ blank lines to 2, and remove control characters (keep `\n`, `\t`).
+2. Fix typos, doubled words, broken spacing, wrong punctuation and capitalisation.
+3. Fix grammar. If a sentence is garbled or does not make sense, rewrite it so it does, keeping the original intent.
+4. Fix text-encoding damage (for example `â€™` -> `’`), stray HTML tags and leftover markup that is clearly noise.
+5. Make the response actually answer its prompt where the intended meaning is clear; do not add new facts.
+6. If a record is hopeless - it is empty, random characters, or its meaning cannot be recovered - add `"_remove": true` to it (keep its other fields as they were).
 
-- Return **exactly the same number of records** you received.
-- Return records in **exactly the same order**.
-- Keep the **same keys** for every record. Do not add new keys.
-- Do **not** merge, split, drop, deduplicate, reorder or invent records.
-- Do **not** delete a record even if it looks empty or low quality; only flag it.
-- Do **not** translate, summarise, shorten or extend the content.
-- Do **not** change numeric or boolean values unless they are stored as broken text.
+## Rules
+
+- Return **exactly the same number of records** you received, in **exactly the same order**.
+- Keep the **same keys** in every record. Do not add other keys (except `_remove`).
+- Do **not** merge, split, reorder or invent records. Duplicates are removed by a separate script, so ignore them.
+- Do **not** translate, summarise, shorten or pad the content.
+- Do **not** change numbers or booleans unless they are stored as broken text.
+- Never blank out a field. Only use `_remove` for a record that is truly unusable, and rarely.
 - If a value is already clean, return it unchanged.
 
 ## Output format
@@ -46,8 +47,8 @@ Return **only** a JSON object in this exact shape, with no commentary:
   "records": [
     { "same_keys_as_input": "cleaned values" }
   ],
-  "warnings": ["optional short notes about specific records"]
+  "warnings": ["optional short notes"]
 }
 ```
 
-`records` must contain the cleaned chunk in the original order. `warnings` is optional.
+`records` holds the cleaned chunk in the original order.

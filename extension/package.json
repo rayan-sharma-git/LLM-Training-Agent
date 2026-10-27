@@ -24,6 +24,7 @@
     "onCommand:llmTrainingAgent.analyzeProject",
     "onCommand:llmTrainingAgent.analyzeDataset",
     "onCommand:llmTrainingAgent.cleanDataset",
+    "onCommand:llmTrainingAgent.mergeCleanedDataset",
     "onCommand:llmTrainingAgent.openChat",
     "onCommand:llmTrainingAgent.viewReport",
     "onCommand:llmTrainingAgent.configureProvider",
@@ -88,6 +89,11 @@
         "title": "Clean Dataset",
         "category": "LLM Training Agent",
         "icon": "$(sparkle)"
+      },
+      {
+        "command": "llmTrainingAgent.mergeCleanedDataset",
+        "title": "Merge Cleaned Dataset",
+        "category": "LLM Training Agent"
       },
       {
         "command": "llmTrainingAgent.openChat",

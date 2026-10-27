@@ -51,14 +51,14 @@ Ask questions about your project in plain language. Answers are based on the rep
 
 ### Clean Dataset
 
-Cleans every dataset file in your project (`.jsonl`, `.json`, `.csv` and similar). Start it from the chat or from **LLM Training Agent: Clean Dataset** in the command palette. It asks you two things:
+Cleans every dataset file in your project (`.jsonl`, `.json`, `.csv` and similar). Start it from the chat ("clean my dataset", "remove duplicates") or from **LLM Training Agent: Clean Dataset** in the command palette. It asks how to clean:
 
-1. **How to clean:**
-   - **Scripts (free).** Fast, nothing leaves your computer. Fixes stray whitespace and control characters.
-   - **AI model.** Sends your data to the model in small chunks so it can also fix typos and formatting. With a paid API this uses your credits, so it asks before doing it.
-2. **Remove duplicates?** Drops exact copies and keeps the first one. This is always a free script step.
+- **Scripts (free).** Nothing leaves your computer. Fixes whitespace and control characters and removes duplicate, empty and meaningless records. Your dataset files are edited directly, and nothing else is created.
+- **AI model.** Does all of that, and also reads every record: it corrects typos and broken sentences and drops what makes no sense. Data goes to the model in small chunks, and with a paid API that uses your credits, so it asks first. Then it asks where to put the result:
+  - **Separate folder (safer).** Cleaned copies go to `.llm-training-agent/cleaned/` so you can compare. Say "merge the cleaned dataset" (or run **Merge Cleaned Dataset**) to replace your originals with them; the folder is removed. Or discard them.
+  - **Change my files directly.** Overwrites your dataset right away; this cannot be undone.
 
-Your files are never overwritten silently. The cleaned versions are shown as a change you can review and apply (see View Changes), and every record is accounted for: records out plus duplicates removed always equals records in.
+A long AI run shows progress, can be cancelled, and never times out. Every record is accounted for: records out plus removed records always equals records in.
 
 ### View Changes
 
@@ -134,11 +134,13 @@ Two requirements files, on purpose:
 
 ## Dataset cleaning
 
-`backend/cleaning/` (route: `POST /api/v1/dataset/clean`). Every dataset file is split into chunks of records (25 records and 12,000 characters by default). With the AI model, each chunk is its own request, so a whole dataset is never sent at once. Answers that break the contract (wrong count or shape) are rejected and the original records are kept. With `useLlm: false` only scripts run and no AI call is made. `removeDuplicates: true` drops exact duplicates after cleaning, keeping the first copy and the order, even across chunks.
+`backend/cleaning/` (route: `POST /api/v1/dataset/clean`). Every dataset file is split into chunks of records (25 records and 12,000 characters by default). With the AI model, each chunk is its own request, so a whole dataset is never sent at once. Answers that break the contract (wrong count or shape) are rejected and the original records are kept. With `useLlm: false` only scripts run and no AI call is made. Duplicates (exact copies, first kept, even across chunks) and empty or meaningless records are always removed by scripts.
 
-Output goes to `<project>/.llm-training-agent/cleaned/` with a `cleaning_manifest.json`. The guarantee is `records_out + duplicates_removed == records_in` per file.
+`inPlace: true` (default) rewrites the original file through a temporary file and an atomic replace, and leaves it alone if nothing changed. `inPlace: false` saves copies in `<project>/.llm-training-agent/cleaned/`; `/dataset/clean/pending`, `/merge` and `/discard` list, apply and delete them. Nothing else is written: no manifest, no logs. The guarantee is `records_out + duplicates_removed + junk_removed == records_in` per file, otherwise the file is not written.
 
-In the extension, `cleaningFlow.ts` asks the two questions, calls the route, then proposes each changed file through the file-editing system below. The flow is written against an interface, so it is tested without VS Code.
+An AI run goes through `POST /dataset/clean/start`; the extension polls `GET /dataset/clean/jobs/{id}` for progress, so no HTTP request is long enough to time out. Jobs live in memory only (`cleaning/jobs.py`).
+
+In the extension, `cleaningFlow.ts` asks the questions, runs the job and offers merge or discard. The flow is written against an interface, so it is tested without VS Code.
 
 ## Chat actions
 

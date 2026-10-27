@@ -1,6 +1,6 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import * as vscode from 'vscode';
-import type { CleaningResult } from './cleaningFlow';
+import type { CleaningProgress, CleaningRequest, CleaningResult } from './cleaningFlow';
 import type { EditSuggestion } from './editFlow';
 
 /**
@@ -272,27 +272,87 @@ export class ApiClient {
   }
 
   /**
-   * Clean every dataset file of a project in LLM-sized chunks.
+   * Clean the dataset files of a project and wait for the answer. Meant for
+   * script cleaning, which is quick; an AI run goes through `runCleaning`
+   * so a slow model can never hit an HTTP timeout.
    *
-   * The backend discovers all dataset files (a directory entry is expanded
-   * recursively), splits each file into sequential chunks and sends one
-   * request per chunk. Cleaned files are written per source file together with
-   * a manifest inside `<project>/.llm-training-agent/cleaned`.
+   * By default the original files are rewritten (`inPlace`). With
+   * `inPlace: false` the cleaned copies go to `.llm-training-agent/cleaned`
+   * until `mergeCleanedCopies` or `discardCleanedCopies` is called.
    */
-  async cleanDatasets(options: {
-    projectPath?: string;
-    datasetPaths?: string[];
-    chunkSize?: number;
-    maxChunkChars?: number;
-    outputDirectory?: string;
-    maxFiles?: number;
-    useLlm?: boolean;
-    removeDuplicates?: boolean;
-  } = {}): Promise<CleaningResult> {
+  async cleanDatasets(options: CleaningRequest = {}): Promise<CleaningResult> {
     const response = await this.client.post('/api/v1/dataset/clean', options, {
       timeout: ANALYSIS_TIMEOUT_MS,
     });
     return response.data as CleaningResult;
+  }
+
+  /**
+   * Clean in the background: start a job, then poll it every few seconds.
+   * Each poll is a short request, so a model that needs an hour is fine.
+   * `isCancelled` is checked between polls; a cancelled run is stopped on the backend.
+   */
+  async runCleaning(
+    options: CleaningRequest,
+    onProgress?: (progress: CleaningProgress) => void,
+    isCancelled?: () => boolean,
+    pollMs = 1500
+  ): Promise<CleaningResult> {
+    const started = await this.client.post('/api/v1/dataset/clean/start', options, { timeout: 30000 });
+    const jobId = String(started.data?.jobId ?? '');
+    if (!jobId) {
+      throw new Error('The backend did not start the cleaning job.');
+    }
+    let failedPolls = 0;
+    for (;;) {
+      if (isCancelled?.()) {
+        await this.client.delete(`/api/v1/dataset/clean/jobs/${jobId}`, { timeout: 10000 }).catch(() => undefined);
+        throw new Error('Cleaning was cancelled.');
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+      let job: any;
+      try {
+        job = (await this.client.get(`/api/v1/dataset/clean/jobs/${jobId}`, { timeout: 30000 })).data;
+        failedPolls = 0;
+      } catch (error) {
+        // A single slow or dropped poll is not a failure; the job keeps running.
+        failedPolls += 1;
+        if (failedPolls >= 5) {
+          throw error;
+        }
+        continue;
+      }
+      if (job.progress && Object.keys(job.progress).length) {
+        onProgress?.(job.progress as CleaningProgress);
+      }
+      if (job.status === 'done') {
+        return job.result as CleaningResult;
+      }
+      if (job.status === 'error') {
+        throw new Error(String(job.error || 'Dataset cleaning failed.'));
+      }
+      if (job.status === 'cancelled') {
+        throw new Error('Cleaning was cancelled.');
+      }
+    }
+  }
+
+  /** Cleaned copies (project-relative paths) waiting in the separate folder. */
+  async pendingCleanedCopies(projectPath: string): Promise<string[]> {
+    const response = await this.client.post('/api/v1/dataset/clean/pending', { projectPath }, { timeout: 30000 });
+    return (response.data?.files ?? []) as string[];
+  }
+
+  /** Replace the originals with the cleaned copies and delete the copies folder. */
+  async mergeCleanedCopies(projectPath: string): Promise<string[]> {
+    const response = await this.client.post('/api/v1/dataset/clean/merge', { projectPath }, { timeout: 60000 });
+    return (response.data?.merged ?? []) as string[];
+  }
+
+  /** Delete the cleaned copies; the originals stay as they are. */
+  async discardCleanedCopies(projectPath: string): Promise<number> {
+    const response = await this.client.post('/api/v1/dataset/clean/discard', { projectPath }, { timeout: 60000 });
+    return Number(response.data?.discarded ?? 0);
   }
 
   async sendChatMessage(

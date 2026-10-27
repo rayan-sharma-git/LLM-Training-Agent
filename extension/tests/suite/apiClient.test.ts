@@ -9,16 +9,19 @@ describe('ApiClient', () => {
   let get: ReturnType<typeof vi.fn>;
   let post: ReturnType<typeof vi.fn>;
   let put: ReturnType<typeof vi.fn>;
+  let del: ReturnType<typeof vi.fn>;
 
   const createClient = () => {
     get = vi.fn();
     post = vi.fn();
     put = vi.fn();
+    del = vi.fn().mockResolvedValue({ data: {} });
 
     const clientInstance = {
       get,
       post,
       put,
+      delete: del,
       interceptors: {
         response: {
           use: vi.fn(() => 0),
@@ -108,6 +111,60 @@ describe('ApiClient', () => {
     const result = await client.listProviders();
     expect(result).toEqual({ providers: ['openai', 'ollama'] });
   });
+  describe('runCleaning (background job)', () => {
+    const options = { projectPath: '/p', useLlm: true, inPlace: false };
+
+    it('starts a job, polls it and returns the result, reporting progress', async () => {
+      post.mockResolvedValueOnce({ data: { jobId: 'j1', status: 'running' } });
+      get
+        .mockResolvedValueOnce({ data: { status: 'running', progress: { chunk_index: 1, chunk_total: 3 } } })
+        .mockResolvedValueOnce({ data: { status: 'done', progress: {}, result: { total_files: 1 } } });
+      const seen: unknown[] = [];
+      const out = await client.runCleaning(options, (p) => seen.push(p), undefined, 0);
+      expect(post).toHaveBeenCalledWith('/api/v1/dataset/clean/start', options, { timeout: 30000 });
+      expect(get).toHaveBeenCalledWith('/api/v1/dataset/clean/jobs/j1', { timeout: 30000 });
+      expect(out).toEqual({ total_files: 1 });
+      expect(seen).toEqual([{ chunk_index: 1, chunk_total: 3 }]);
+    });
+
+    it('survives a few failed polls (the job keeps running on the backend)', async () => {
+      post.mockResolvedValueOnce({ data: { jobId: 'j1' } });
+      get
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockResolvedValueOnce({ data: { status: 'done', result: { total_files: 2 } } });
+      await expect(client.runCleaning(options, undefined, undefined, 0)).resolves.toEqual({ total_files: 2 });
+    });
+
+    it('gives up after repeated poll failures', async () => {
+      post.mockResolvedValueOnce({ data: { jobId: 'j1' } });
+      get.mockRejectedValue(new Error('backend gone'));
+      await expect(client.runCleaning(options, undefined, undefined, 0)).rejects.toThrow('backend gone');
+    });
+
+    it('surfaces the job error', async () => {
+      post.mockResolvedValueOnce({ data: { jobId: 'j1' } });
+      get.mockResolvedValueOnce({ data: { status: 'error', error: 'provider said no' } });
+      await expect(client.runCleaning(options, undefined, undefined, 0)).rejects.toThrow('provider said no');
+    });
+
+    it('stops the backend job when cancelled', async () => {
+      post.mockResolvedValueOnce({ data: { jobId: 'j1' } });
+      await expect(client.runCleaning(options, undefined, () => true, 0)).rejects.toThrow('cancelled');
+      expect(del).toHaveBeenCalledWith('/api/v1/dataset/clean/jobs/j1', { timeout: 10000 });
+    });
+  });
+
+  it('merges, lists and discards cleaned copies', async () => {
+    post.mockResolvedValueOnce({ data: { files: ['a.jsonl'] } });
+    post.mockResolvedValueOnce({ data: { merged: ['a.jsonl'] } });
+    post.mockResolvedValueOnce({ data: { discarded: 2 } });
+    await expect(client.pendingCleanedCopies('/p')).resolves.toEqual(['a.jsonl']);
+    await expect(client.mergeCleanedCopies('/p')).resolves.toEqual(['a.jsonl']);
+    await expect(client.discardCleanedCopies('/p')).resolves.toBe(2);
+    expect(post.mock.calls[1][0]).toBe('/api/v1/dataset/clean/merge');
+    expect(post.mock.calls[1][1]).toEqual({ projectPath: '/p' });
+  });
 });
 
 describe('describeErrorBody', () => {
@@ -133,4 +190,5 @@ describe('describeErrorBody', () => {
     expect(describeErrorBody(undefined)).toBeUndefined();
     expect(describeErrorBody({})).toBeUndefined();
   });
+
 });
