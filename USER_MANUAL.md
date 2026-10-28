@@ -16,7 +16,7 @@ The extension scans your datasets, prompts, configs, and scripts and posts one r
 
 ## 3. What the report contains
 
-Each value is labelled *measured* (from your files), *calculated* (from a formula), *heuristic* (rule of thumb), or *assumed*. The report covers: detected task, dataset size and quality, prompt clarity, hyperparameter review, model advice, detected GPUs, training-time and cost estimates with assumptions, risks, prioritised recommendations, and a concrete next experiment.
+Each value is labelled *measured* (from your files), *calculated* (from a formula), *heuristic* (rule of thumb), or *assumed*. The report opens with what was found in your own project: the training script(s) (for example `fine_tune.py`), the base model, and the fine-tuning method and settings read from the code (LoRA/QLoRA, rank, learning rate, epochs, batch size and so on); anything not found is left out rather than guessed. It then covers: detected task, dataset size and quality, prompt clarity, hyperparameter review, model advice, detected GPUs, training-time and cost estimates with assumptions, risks, prioritised recommendations, and a concrete next experiment.
 
 ## 4. Analyze Dataset
 
@@ -24,7 +24,16 @@ Run `LLM Training Agent: Analyze Dataset` and pick a folder in the dialog for a 
 
 ## 5. Chat
 
-The **Chat** view holds the report and answers follow-up questions about your project. History is per project. If no AI provider is configured, chat says so instead of guessing.
+The **Chat** view opens on a list of your previous chats for the current project (title, date and time, newest first). **New chat** starts an empty one; a chat is also created automatically the moment you send your first message, and it gets a short title from that message. Open a chat to see the whole conversation again, including change viewers and answered cards; use the back arrow to return to the list and the ✕ on a row to delete a chat. Chats are stored by the backend, so they are still there after restarting VS Code. Every message has a **Copy Message** button.
+
+Besides answering questions, the chat can carry out requests itself:
+
+- **Change a setting** – for example "change epochs from 3 to 5". The agent finds the setting in your scripts and config files (under its different names and formats), edits the right file, re-parses the file to check it still validates, and shows the edit as a red/green change. If the setting appears in several places it asks which one. Say "revert that" (or press **Revert**) to undo it; edits you made elsewhere in the file in the meantime are kept, and if the edited lines themselves were changed it refuses instead of guessing.
+- **Clean data** – the agent first asks how to clean (script or AI), then whether to write **separate output files** or **modify the existing files**. What it did is remembered in your project (`.llm-training-agent/cleaning_jobs/`), so "merge the cleaned data", "restore the original data" or "discard the cleaned data" work later, also after a restart or from another chat. A merge checks that the files were not changed in between, keeps backups, verifies the result and then removes the temporary cleaned folder. Records the AI could not process are kept unchanged and summarised in one short note instead of one warning per chunk.
+- **Run a terminal command** – for example `git status`. See *Permissions* below.
+- **Describe where you train** – for example "I train on a RunPod A100 at $2.00/hr". Estimates then use it (see *Analyze Project*).
+
+If no AI provider is configured, ordinary questions say so instead of guessing; the requests above do not need one.
 
 ## 6. Reports
 
@@ -38,15 +47,30 @@ Supported providers: Ollama, OpenAI, Anthropic, Google Gemini, DeepSeek, Cohere,
 
 ## 8. View Changes
 
-Run `LLM Training Agent: View Changes` to review file edits the agent proposed. Each opens in a diff editor with **Approve & Apply**, **Reject**, or **Dismiss**. Nothing is written without approval, conflicts with your newer edits are blocked, backups are kept for rollback, and proposals expire after 24 hours.
+Run `LLM Training Agent: View Changes` (or ask "show the changes") to see the latest edits **inside the chat**: the file path, then one bordered block per change. Removed lines are red and labelled **Removed**, replacement lines are green and labelled **Added**, with line numbers and unchanged context lines around them. Nothing opens in a separate editor. Conflicts with your newer edits are blocked, backups are kept for rollback, and proposals expire after 24 hours.
 
-Dataset cleaning and experiment tracking have no dedicated views: ask the chat agent to clean a dataset (output goes to `.llm-training-agent/cleaned/`, originals untouched), and experiments are available through the backend API.
+Dataset cleaning is done from the chat (see *Chat*), and experiments are available through the backend API.
 
-## 9. Settings and storage
+## 9. Permissions
 
-Settings (`llmTrainingAgent.provider`, `llmTrainingAgent.model`, `llmTrainingAgent.pythonPath`, `llmTrainingAgent.backendUrl`) are user-level and never stored in your project. Analysis history lives in the extension's VS Code global storage (`llm_training_agent.db`); pending changes and backups live in `.llm_training_agent/` and `.llm_training_agent_backups/` inside your project. See [DELETION.md](DELETION.md) for cleanup.
+**Settings → Permissions** has four independent switches. They are enforced by the backend, not just hidden in the interface:
 
-## 10. Backend runtime setup (automatic)
+| Permission | Default | Allows |
+| --- | --- | --- |
+| Read files | on | Reading project files for analysis, datasets and finding settings |
+| Write files | off | Editing settings, cleaning/merging data, reverting |
+| Run safe terminal commands | off | Read-only commands such as `ls`, `git status`, `git diff`, `pip list`, `nvidia-smi` |
+| Run unrestricted terminal commands | off | Any command except a short list of destructive ones |
+
+When something needs a permission that is off, the chat shows what it wants to do with **Allow** / **Deny** buttons; Allow applies to that one action only. Without unrestricted commands, any command that is not on the safe list needs that approval each time. Commands that could destroy data (for example `rm -rf /`, formatting a disk) are always refused, even with everything turned on. Commands run inside the project folder with secret-looking environment variables removed, a time limit and a cap on output, and their output is scrubbed of keys. In an untrusted VS Code workspace, writing and commands are switched off regardless of these settings. The permission settings are user-level, so a project's own `.vscode/settings.json` cannot switch them on.
+
+## 10. Settings and storage
+
+**Training Hardware** (Settings view) tells Analyze Project where you train: *my own GPU*, *rented cloud GPU*, or detect automatically. A training-time estimate uses your project and hardware. A **cost** is only shown for a cloud GPU and only when you entered its hourly rate (cost = estimated runtime × that rate, with the assumptions listed); for your own GPU no rental cost is shown. Nothing about models, GPUs, settings, runtimes or prices is assumed when it cannot be found in your project or given by you.
+
+Settings (`llmTrainingAgent.provider`, `llmTrainingAgent.model`, `llmTrainingAgent.pythonPath`, `llmTrainingAgent.backendUrl`, `llmTrainingAgent.permissions.*`, `llmTrainingAgent.hardware.*`) are user-level and never stored in your project. Analysis history lives in the extension's VS Code global storage (`llm_training_agent.db`); pending changes and backups live in `.llm_training_agent/` and `.llm_training_agent_backups/` inside your project. See [DELETION.md](DELETION.md) for cleanup.
+
+## 11. Backend runtime setup (automatic)
 
 On first use the extension prepares its Python backend automatically — you
 do not install anything by hand:
@@ -98,7 +122,7 @@ success), then retry **Analyze Project**. Developer tooling
 (`pytest`, `ruff`, `black`, `mypy`) lives only in the root
 `requirements.txt` and is never needed to run the extension.
 
-## 11. Troubleshooting and limitations
+## 12. Troubleshooting and limitations
 
 - Backend will not start: open the **LLM Training Agent: Backend** output channel (see §10). Usually Python or its packages are missing — approving the install prompt fixes it; the channel names the exact interpreter, missing packages, and manual command.
 - Webview shows "Could not register service worker" or buttons do nothing: reload the window. If it persists, the output channel and the extension log (command names only, never keys) say which handler failed.

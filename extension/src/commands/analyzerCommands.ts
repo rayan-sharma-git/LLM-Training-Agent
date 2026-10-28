@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { ApiClient } from '../services/apiClient';
+import { ApiClient, AnalysisResult, permissionRequiredAction } from '../services/apiClient';
+import { readHardwareSettings } from '../services/permissions';
 import { SettingsManager } from '../services/settings';
 import { SimpleTreeDataProvider } from '../views/simpleTreeView';
 import { ChatWebviewProvider } from '../views/chatWebviewProvider';
@@ -143,6 +144,48 @@ async function askPermissionToInstall(
   return '';
 }
 
+
+/**
+ * Run the analysis; when the backend refuses with "permission needed", ask in the chat
+ * (Allow / Deny) and, if allowed, retry once with a single-use grant. Denying leaves
+ * the project untouched. Returns `undefined` when the user denied.
+ */
+async function analyzeWithPermission(
+  apiClient: ApiClient,
+  chatProvider: ChatWebviewProvider | null,
+  projectPath: string
+): Promise<AnalysisResult | undefined> {
+  const hardware = readHardwareSettings();
+  try {
+    return await apiClient.analyzeProject(projectPath, hardware);
+  } catch (error) {
+    const action = permissionRequiredAction(error);
+    if (action !== 'read' && action !== 'write') {
+      throw error;
+    }
+    const label = action === 'read' ? 'read the files in this project' : 'write files in this project';
+    const text =
+      `Analyzing the project means I have to ${label}, which is turned off in Settings → Permissions.\n\n` +
+      'Allow it this once?';
+    let choice = '';
+    if (chatProvider) {
+      choice = await chatProvider.postActionCard({
+        text,
+        actionId: `perm-${action}-${Date.now()}`,
+        buttons: [
+          { label: 'Allow', action: 'allow' },
+          { label: 'Deny', action: 'deny' },
+        ],
+      });
+    }
+    if (choice !== 'allow') {
+      return undefined;
+    }
+    await apiClient.allowOnce(projectPath, action);
+    return apiClient.analyzeProject(projectPath, hardware);
+  }
+}
+
 /**
  * Registers the project analysis command.
  * - llmTrainingAgent.analyzeProject : checks backend dependencies, then scans
@@ -276,7 +319,13 @@ export function registerAnalyzerCommands(
               return;
             }
             progress.report({ increment: 20, message: 'Scanning project' });
-            const result = await apiClient.analyzeProject(projectPath);
+            const result = await analyzeWithPermission(apiClient, chatProvider, projectPath);
+            if (!result) {
+              if (chatProvider) {
+                void chatProvider.postAssistantMessage('Analysis was not run because reading project files was not allowed.');
+              }
+              return;
+            }
             progress.report({ increment: 80, message: 'Generating report' });
             vscode.window.showInformationMessage('Analysis complete');
 
@@ -301,12 +350,13 @@ export function registerAnalyzerCommands(
             if (chatProvider && result) {
               const analysis = result.analysis;
               if (analysis && analysis.markdown) {
-                chatProvider.postAssistantMessage(analysis.markdown);
+                void chatProvider.postAssistantMessage(analysis.markdown, { title: 'Project analysis' });
               } else if (result.report && result.report.gpu_time_estimate) {
                 // Graceful degradation: an older backend without the composed
                 // analysis still shows the GPU estimate rather than nothing.
-                chatProvider.postAssistantMessage(
-                  formatGpuEstimateForChat(result.report.gpu_time_estimate)
+                void chatProvider.postAssistantMessage(
+                  formatGpuEstimateForChat(result.report.gpu_time_estimate),
+                  { title: 'Project analysis' }
                 );
               }
             }

@@ -121,3 +121,36 @@ describe('packaging rules (.vscodeignore)', () => {
     expect(lines).not.toContain('out/**');
   });
 });
+
+describe('permissions, hardware and icon in the manifest', () => {
+  const props = manifest.contributes.configuration.properties;
+
+  it('declares the four independent permissions with safe defaults', () => {
+    expect(props['llmTrainingAgent.permissions.readFiles'].default).toBe(true);
+    for (const key of ['writeFiles', 'safeCommands', 'unrestrictedCommands']) {
+      expect(props[`llmTrainingAgent.permissions.${key}`].default).toBe(false);
+    }
+  });
+
+  it('keeps permissions application-scoped so a repository cannot grant itself access', () => {
+    for (const key of Object.keys(props).filter((k) => k.startsWith('llmTrainingAgent.permissions.'))) {
+      expect(props[key].scope).toBe('application');
+    }
+  });
+
+  it('has a real marketplace icon and a monochrome activity-bar icon', () => {
+    expect(manifest.icon).toBe('resources/icon.png');
+    expect(fs.existsSync(path.join(EXTENSION_DIR, manifest.icon))).toBe(true);
+    const svg = read('resources/icon.svg');
+    expect(svg).toContain('currentColor');
+    expect(svg).not.toContain('#007acc');
+  });
+
+  it('ships the chat page files (not excluded by .vscodeignore)', () => {
+    const ignore = read('.vscodeignore');
+    expect(ignore).not.toMatch(/^media\b/m);
+    expect(fs.existsSync(path.join(EXTENSION_DIR, 'media', 'chat.js'))).toBe(true);
+    expect(fs.existsSync(path.join(EXTENSION_DIR, 'media', 'chat.css'))).toBe(true);
+  });
+});
+

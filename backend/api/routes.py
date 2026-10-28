@@ -39,6 +39,10 @@ from analyzers.model_advisor import ModelAdvisor
 from analyzers.cost_estimator import CostEstimator
 from analyzers.use_case_detector import UseCaseDetector
 from analysis.orchestrator import AnalysisOrchestrator
+from analysis.project_findings import HardwareProfile, build_project_findings
+from analysis import hardware_store
+from api.permission_guard import require_permission
+from core import permissions as perms
 from prediction.engine import PredictionEngine
 from recommendation.engine import RecommendationEngine
 from reports.generator import ReportGenerator
@@ -372,6 +376,7 @@ async def _run_and_persist_analysis(
     project_path: str,
     *,
     clean_datasets: bool = False,
+    hardware_profile: Optional[HardwareProfile] = None,
 ) -> Dict[str, Any]:
     """Execute the analysis pipeline and persist the run as one history record.
 
@@ -409,7 +414,7 @@ async def _run_and_persist_analysis(
 
     try:
         pipeline = await _execute_analysis_pipeline(
-            project_path, clean_datasets=clean_datasets
+            project_path, clean_datasets=clean_datasets, hardware_profile=hardware_profile
         )
     except Exception as error:
         if analysis_id:
@@ -488,6 +493,7 @@ async def _execute_analysis_pipeline(
     *,
     clean_datasets: bool = False,
     progress: Optional[Any] = None,
+    hardware_profile: Optional[HardwareProfile] = None,
 ) -> Dict[str, Any]:
     """Run scan → context → analyzers → prediction → recommendations → report.
 
@@ -639,39 +645,55 @@ async def _execute_analysis_pipeline(
         recommendations = []
         failures.append(run_failure("recommendations", e, critical=False))
 
-    # Step 5b: GPU detection & time estimation (integrated into analysis)
+    # Step 5b: GPU detection, runtime and (cloud only) cost, read from the project
     await emit("hardware", "Analyzing hardware and GPU requirements...")
     gpu_time_estimate = None
     hardware_result = None
+    project_findings = None
     try:
         hardware_result = detect_gpus().to_dict()
-        training_config = extract_training_config_from_context(context)
-        # The estimator can only see the dataset size if it is told: the
-        # scanner's project_statistics carries no sample count, so without this
-        # the estimate would silently degenerate to 0 seconds / 0 steps.
-        # Measured analyzer outputs take precedence over file-scan guesses.
-        if dataset_result_obj is not None and getattr(dataset_result_obj, "sample_count", 0):
-            training_config.dataset_samples = int(dataset_result_obj.sample_count)
-        if hp_result_obj is not None:
-            if hp_result_obj.batch_size:
-                training_config.batch_size = int(hp_result_obj.batch_size)
-            if hp_result_obj.epochs:
-                training_config.epochs = int(hp_result_obj.epochs)
-            if hp_result_obj.gradient_accumulation:
-                training_config.gradient_accumulation = int(hp_result_obj.gradient_accumulation)
-            if hp_result_obj.sequence_length:
-                training_config.sequence_length = int(hp_result_obj.sequence_length)
-            if hp_result_obj.lora_rank:
-                training_config.training_method = "lora"
+        # Chat statements ("I use an A100 on RunPod at $1.89/hr") are stored per
+        # project and take precedence over the VS Code hardware settings.
+        stored_profile = await hardware_store.load_profile(project_path)
+        profile = stored_profile or hardware_profile or HardwareProfile()
+
+        advisor_params: Optional[float] = None
         if model_result_obj is not None and getattr(model_result_obj, "parameter_count", None):
             try:
-                training_config.param_count_billions = float(
+                advisor_params = float(
                     str(model_result_obj.parameter_count).lower().replace("b", "").strip()
                 )
             except (TypeError, ValueError):
-                pass
-        estimator = GPUTimeEstimator()
-        estimate_result = estimator.estimate(training_config, mode="quick")
+                advisor_params = None
+
+        overrides: Dict[str, Any] = {}
+        if hp_result_obj is not None:
+            overrides = {
+                "batch_size": hp_result_obj.batch_size,
+                "epochs": hp_result_obj.epochs,
+                "gradient_accumulation": hp_result_obj.gradient_accumulation,
+                "sequence_length": hp_result_obj.sequence_length,
+            }
+        tokens_per_sample = None
+        if dataset_result_obj is not None:
+            chars = (getattr(dataset_result_obj, "average_prompt_length", 0.0) or 0.0) + (
+                getattr(dataset_result_obj, "average_response_length", 0.0) or 0.0)
+            if chars > 0:
+                tokens_per_sample = chars / 4.0
+        samples = int(getattr(dataset_result_obj, "sample_count", 0) or 0) if dataset_result_obj is not None else 0
+
+        project_findings, estimate_result, training_config = build_project_findings(
+            context,
+            dataset_samples=samples or None,
+            detected_hardware=hardware_result,
+            profile=profile,
+            tokens_per_sample=None,  # sequence length comes from the code, not the data
+            advisor_param_billions=advisor_params,
+            config_overrides=overrides,
+        )
+        if estimate_result is None:
+            # No known GPU / dataset: keep the estimator's explicit "unavailable" result.
+            estimate_result = GPUTimeEstimator().estimate(training_config, mode="quick")
         gpu_time_estimate = estimate_result.to_dict()
     except Exception as e:
         logger.warning(f"GPU time estimation failed during analysis: {e}")
@@ -724,6 +746,7 @@ async def _execute_analysis_pipeline(
             use_case=use_case_result,
             failures=failures,
             analysis_status=run_status,
+            findings=project_findings,
         )
     except Exception as e:
         # A composition failure must never discard the analysis that already ran.
@@ -769,9 +792,14 @@ async def analyze_project(request: Dict[str, Any]):
             )
         )
 
+        await require_permission(project_path, perms.READ)
+        wants_cleaning = _as_bool(request.get("cleanDatasets"), False)
+        if wants_cleaning:  # cleaning writes cleaned copies into the project
+            await require_permission(project_path, perms.WRITE)
         return await _run_and_persist_analysis(
             project_path,
-            clean_datasets=_as_bool(request.get("cleanDatasets"), False),
+            clean_datasets=wants_cleaning,
+            hardware_profile=HardwareProfile.from_dict(request.get("hardware")),
         )
     except HTTPException:
         raise
@@ -1017,6 +1045,8 @@ async def clean_datasets(request: Dict[str, Any]):
             project_path = str(resolve_workspace_root(str(first.parent if first.is_absolute() else Path.cwd())))
         if not Path(project_path).is_dir():
             raise HTTPException(status_code=404, detail={"errorCode": "PROJECT_NOT_FOUND", "message": "Project directory was not found."})
+        await require_permission(project_path, perms.READ)
+        await require_permission(project_path, perms.WRITE)
 
         if not dataset_paths:
             # Discover dataset files with the same rules the scanner uses.
@@ -1885,6 +1915,7 @@ async def apply_file_change(change_id: str, request: Dict[str, Any]):
     """
     try:
         store = _change_store(request.get("projectRoot"))
+        await require_permission(str(store.project_root), perms.WRITE)
         record = store.apply(change_id)
         verification = store.verify(record)
         payload = _public(record, include_contents=False)
@@ -1928,11 +1959,51 @@ async def verify_file_change(change_id: str, projectRoot: Optional[str] = None):
         )
 
 
+@router.get("/files/changes/{change_id}/view")
+async def view_file_change(change_id: str, projectRoot: Optional[str] = None):
+    """The change as separate removed (red) / added (green) blocks for the inline viewer."""
+    try:
+        store = _change_store(projectRoot)
+        await require_permission(str(store.project_root), perms.READ)
+        return store.view(change_id)
+    except ChangeStoreError as e:
+        raise _change_http(e)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("View file change failed", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"errorCode": "VIEW_CHANGE_FAILED", "message": "The change could not be loaded."},
+        )
+
+
+@router.post("/files/changes/{change_id}/revert")
+async def revert_file_change(change_id: str, request: Dict[str, Any]):
+    """Undo an applied change on top of the file's current content (keeps later edits)."""
+    try:
+        store = _change_store(request.get("projectRoot"))
+        await require_permission(str(store.project_root), perms.WRITE)
+        record = store.revert(change_id)
+        return _public(record, include_contents=False)
+    except ChangeStoreError as e:
+        raise _change_http(e)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.error("Revert file change failed", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={"errorCode": "REVERT_FAILED", "message": "The change could not be reverted."},
+        )
+
+
 @router.post("/files/changes/{change_id}/rollback")
 async def rollback_file_change(change_id: str, request: Dict[str, Any]):
     """Restore the pre-apply content from the stored backup."""
     try:
         store = _change_store(request.get("projectRoot"))
+        await require_permission(str(store.project_root), perms.WRITE)
         record = store.rollback(change_id)
         return _public(record, include_contents=False)
     except ChangeStoreError as e:
@@ -1945,3 +2016,11 @@ async def rollback_file_change(change_id: str, request: Dict[str, Any]):
             status_code=500,
             detail={"errorCode": "ROLLBACK_FAILED", "message": "The change could not be rolled back."},
         )
+
+
+# ---------------------------------------------------------------------------
+# Chat agent (sessions, cards, permissions)
+# ---------------------------------------------------------------------------
+from api.agent_routes import router as _agent_router  # noqa: E402
+
+router.include_router(_agent_router)

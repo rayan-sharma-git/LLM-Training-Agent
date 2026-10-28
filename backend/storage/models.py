@@ -265,6 +265,8 @@ class ChatSession(Base):
 
     session_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id = Column(String(36), ForeignKey("projects.project_id"), nullable=False)
+    #: Short title generated from the conversation (see ``chat.sessions``).
+    title = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -281,9 +283,35 @@ class ChatMessageRecord(Base):
     session_id = Column(String(36), ForeignKey("chat_sessions.session_id"), nullable=False)
     role = Column(String(50), nullable=False)
     content = Column(Text, nullable=False)
+    #: Rich parts of the message (change viewer, action cards, command output).
+    blocks = Column(JSON)
+    #: Position within the session; orders messages created in the same instant.
+    seq = Column(Integer)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
     session = relationship("ChatSession", back_populates="messages")
+
+
+class AgentPendingAction(Base):
+    """A question the agent asked in chat that is waiting for the user's answer.
+
+    Stored server-side so an Allow / Deny (or "separate files / modify files")
+    card still works after VS Code restarts, and so the answer can only ever
+    authorise the exact action recorded here.
+    """
+
+    __tablename__ = "agent_pending_actions"
+
+    action_id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_path = Column(String(1024), nullable=False)
+    session_id = Column(String(36))
+    message_id = Column(String(36))
+    kind = Column(String(50), nullable=False)
+    payload = Column(JSON, nullable=False)
+    status = Column(String(20), nullable=False, default="pending")
+    choice = Column(String(50))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    resolved_at = Column(DateTime(timezone=True))
 
 
 class FileModification(Base):

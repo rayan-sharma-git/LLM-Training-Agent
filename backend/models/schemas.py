@@ -22,6 +22,9 @@ class ProjectContext(BaseModel):
     inference_scripts: List[str] = []
     hardware_information: Dict[str, Any] = {}
     project_statistics: Dict[str, Any] = {}
+    #: Static inspection of the training code (scripts, base model, LoRA/QLoRA
+    #: settings, training arguments), each value with its file and line.
+    training_insights: Dict[str, Any] = {}
     project_health_score: Optional[float] = None
     training_readiness_score: Optional[float] = None
     analysis_timestamp: Optional[datetime] = None
@@ -55,8 +58,15 @@ class ChunkCleaningSummary(BaseModel):
     record_count: int
     records_cleaned: int = 0
     llm_used: bool = False
-    status: str = "cleaned"  # cleaned | fallback | failed
+    status: str = "cleaned"  # cleaned | fallback | deterministic | failed
     warnings: List[str] = []
+    #: Why an AI chunk was skipped: "unparsable" | "contract" | "prompt".
+    failure_reason: Optional[str] = None
+    #: 1-based position of the chunk's first and last record in the file.
+    first_record: int = 0
+    last_record: int = 0
+    #: Notes the model attached to this chunk (shown once, de-duplicated, per file).
+    notes: List[str] = []
 
 
 class FileCleaningSummary(BaseModel):
@@ -77,6 +87,8 @@ class FileCleaningSummary(BaseModel):
     records_preserved: bool = True
     warnings: List[str] = []
     errors: List[str] = []
+    #: Aggregated AI failures: chunks/records kept as they were, by reason.
+    failure_summary: Dict[str, Any] = {}
 
 
 class DatasetCleaningResult(BaseModel):
@@ -100,6 +112,10 @@ class DatasetCleaningResult(BaseModel):
     max_chunk_chars: int = 0
     warnings: List[str] = []
     confidence: str = "medium"
+    #: Totals of AI chunks that could not be used (records were kept unchanged).
+    failure_summary: Dict[str, Any] = {}
+    #: One short paragraph for the chat.
+    summary_text: str = ""
 
 
 class PromptAnalysisResult(BaseModel):
@@ -443,6 +459,7 @@ class CompleteAnalysis(BaseModel):
     risks: List[RiskItem] = []
     recommendations: List[Dict[str, Any]] = []
     next_experiment: Optional[Dict[str, Any]] = None
+    project_findings: Optional[Dict[str, Any]] = None
 
     model_information_notice: str = ""
     unavailable_sections: List[Dict[str, str]] = []

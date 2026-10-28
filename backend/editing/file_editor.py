@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from editing import resolve_project_file
+from editing.diff_view import build_hunks, reverse_hunks
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +40,10 @@ APPLIED = "APPLIED"
 FAILED = "FAILED"
 CONFLICTED = "CONFLICTED"
 CANCELLED = "CANCELLED"
+REVERTED = "REVERTED"
 
 #: States in which a change can no longer be applied.
-TERMINAL_STATES = frozenset({APPLIED, REJECTED, CANCELLED, FAILED, CONFLICTED})
+TERMINAL_STATES = frozenset({APPLIED, REJECTED, CANCELLED, FAILED, CONFLICTED, REVERTED})
 
 #: Supported operations. ``delete`` is the most destructive and is gated by the
 #: same explicit-approval requirement as every other operation.
@@ -642,11 +644,95 @@ class ChangeStore:
         self._persist(record)
         return record
 
-    def _backup(self, record: Dict[str, Any], data: bytes) -> Path:
+    # ------------------------------------------------------------------
+    # structured diff and safe revert
+    # ------------------------------------------------------------------
+    def view(self, change_id: str) -> Dict[str, Any]:
+        """Return the change as separate red/green blocks for the inline viewer."""
+        record = self.require(change_id)
+        result = build_hunks(record.get("originalContent") or "", record.get("proposedContent") or "")
+        return {
+            "changeId": record["changeId"],
+            "filePath": record["filePath"],
+            "operation": record.get("operation", OP_MODIFY),
+            "status": record.get("status"),
+            "reason": record.get("reason"),
+            **result,
+        }
+
+    def latest_applied(self, file_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """The most recently applied, not yet reverted change (optionally for one file)."""
+        wanted = None
+        if file_path:
+            wanted = self._relativize(self.project_root, self.project_file(file_path))
+        applied = [r for r in self._all_records()
+                   if r.get("status") == APPLIED and (wanted is None or r.get("filePath") == wanted)]
+        applied.sort(key=lambda r: r.get("appliedAt", ""), reverse=True)
+        return applied[0] if applied else None
+
+    def revert(self, change_id: str) -> Dict[str, Any]:
+        """Undo an applied change **without discarding later, unrelated edits**.
+
+        The change's own edits are located in the file's *current* content and
+        reversed one by one.  When the user has since changed those same lines
+        (or the file is gone) nothing is written and a ``REVERT_CONFLICT`` error
+        explains why.  A backup of the current content is kept before writing.
+        """
+        record = self.require(change_id)
+        if record.get("status") != APPLIED:
+            raise ChangeStoreError(
+                "NOT_APPLIED", "Only a change that is currently applied can be reverted.", 409)
+
+        target = self.project_file(record["filePath"])
+        operation = record.get("operation", OP_MODIFY)
+        original = record.get("originalContent") or ""
+        proposed = record.get("proposedContent") or ""
+        newline = record.get("newline") or "\n"
+        bom = bool(record.get("bom"))
+        current_bytes = _read_bytes(target)
+        exists = current_bytes is not None
+        current = _decode(current_bytes) if exists else ""
+
+        def conflict(message: str, details: Any = None) -> ChangeStoreError:
+            return ChangeStoreError("REVERT_CONFLICT", message, 409, details)
+
+        backup_path: Optional[Path] = None
+        if operation == OP_DELETE:
+            if exists:
+                raise conflict("The deleted file exists again, so it was left untouched.")
+            _atomic_write(target, _encode(_apply_newline(original, newline), bom))
+        elif operation == OP_CREATE:
+            if not exists:
+                raise conflict("The file this change created no longer exists.")
+            if current.replace("\r\n", "\n") != proposed.replace("\r\n", "\n"):
+                raise conflict("The created file was edited afterwards, so it was not deleted.")
+            backup_path = self._backup(record, current_bytes or b"", suffix="revert")
+            target.unlink()
+        else:
+            if not exists:
+                raise conflict("The file no longer exists, so there is nothing to revert.")
+            restored, problems = reverse_hunks(original, proposed, current)
+            if restored is None:
+                raise conflict(
+                    "Parts of this change were edited again, so it cannot be reverted automatically "
+                    "without overwriting your newer work.", problems)
+            backup_path = self._backup(record, current_bytes or b"", suffix="revert")
+            _atomic_write(target, _encode(_apply_newline(restored, newline), bom))
+
+        record["status"] = REVERTED
+        record["revertedAt"] = _iso(_now())
+        record["updatedAt"] = _iso(_now())
+        if backup_path is not None:
+            record["revertBackupPath"] = str(backup_path)
+        self._persist(record)
+        return record
+
+    def _backup(self, record: Dict[str, Any], data: bytes, suffix: str = "") -> Path:
         """Persist the pre-change bytes so the operation stays recoverable."""
         self._backup_dir.mkdir(parents=True, exist_ok=True)
         safe = record["filePath"].replace("/", "_").replace("\\", "_")
-        path = self._backup_dir / f"{safe}.{record['changeId']}.bak"
+        tag = f".{suffix}" if suffix else ""
+        path = self._backup_dir / f"{safe}.{record['changeId']}{tag}.bak"
         _atomic_write(path, data)
         return path
 

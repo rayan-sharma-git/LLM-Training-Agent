@@ -100,6 +100,8 @@ describe('webview button wiring', () => {
   // webview already binds immediately, and the Settings webview must too.
   const settingsSrc = read(path.join('src', 'views', 'settingsWebviewProvider.ts'));
   const chatSrc = read(path.join('src', 'views', 'chatWebviewProvider.ts'));
+  // The chat page itself now lives in media/chat.js (loaded by the provider).
+  const chatPage = read(path.join('media', 'chat.js'));
 
   it('binds settings buttons immediately instead of waiting for DOMContentLoaded', () => {
     expect(settingsSrc).not.toContain("addEventListener('DOMContentLoaded'");
@@ -107,8 +109,12 @@ describe('webview button wiring', () => {
   });
 
   it('keeps the chat send button wired through direct element binding', () => {
-    expect(chatSrc).toContain("getElementById('send')");
-    expect(chatSrc).toContain("getElementById('input')");
+    expect(chatSrc).toContain('chat.js');
+    expect(chatPage).toContain("$('send')");
+    expect(chatPage).toContain("$('input')");
+    expect(chatPage).toContain("sendBtn.addEventListener('click', send)");
+    // No DOMContentLoaded deferral: the script runs at the end of <body>.
+    expect(chatPage).not.toContain('DOMContentLoaded');
   });
 
   it('logs webview message-handler failures instead of failing silently', () => {

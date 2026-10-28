@@ -27,7 +27,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_TRAINING_AGENT_ALLOWED_ROOTS", str(root))
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
-    return TestClient(app), root
+    test_client = TestClient(app)
+    # Writing is off by default; these tests exercise the change workflow itself.
+    granted = test_client.put("/api/v1/agent/permissions", json={
+        "projectPath": str(root), "permissions": {"readFiles": True, "writeFiles": True}})
+    assert granted.status_code == 200
+    return test_client, root
 
 
 def _write(root: Path, name: str, content: str) -> str:
@@ -473,6 +478,8 @@ def test_proposal_cannot_cross_workspaces(client, tmp_path, monkeypatch):
     root_b.mkdir()
     _write(root_b, "b.py", "B original\n")
     monkeypatch.setenv("LLM_TRAINING_AGENT_ALLOWED_ROOTS", f"{root_a}{os.pathsep}{root_b}")
+    test_client.put("/api/v1/agent/permissions", json={
+        "projectPath": str(root_b), "permissions": {"readFiles": True, "writeFiles": True}})
 
     # Not visible from B.
     listed = test_client.get("/api/v1/files/changes", params={"projectRoot": str(root_b)})

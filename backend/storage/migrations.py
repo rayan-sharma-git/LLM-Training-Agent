@@ -32,7 +32,7 @@ from core.errors import StorageError
 logger = logging.getLogger(__name__)
 
 #: Target schema version of this codebase.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: ``{table: {column: column-DDL}}`` — additive column definitions per
 #: migration.  Types are SQLite type names used verbatim in ``ADD COLUMN``.
@@ -62,12 +62,17 @@ _MIGRATION_COLUMNS: Dict[int, Dict[str, Dict[str, str]]] = {
             "error": "TEXT",
         },
     },
+    3: {
+        "chat_sessions": {"title": "TEXT"},
+        "chat_messages": {"blocks": "JSON", "seq": "INTEGER"},
+    },
 }
 
 #: Unique (id, version) identifiers, ordered ascending.
 MIGRATIONS: List[Tuple[str, int]] = [
     ("0001_initial_schema", 1),
     ("0002_analysis_run_and_experiment_fields", 2),
+    ("0003_chat_history_and_agent_actions", 3),
 ]
 
 

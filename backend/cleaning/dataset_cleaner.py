@@ -155,6 +155,8 @@ class DatasetCleaner:
             )
 
         result.total_files = len(result.files)
+        result.failure_summary = merge_failure_summaries([f.failure_summary for f in result.files])
+        result.summary_text = describe_result(result)
         result.total_records_in = sum(f.records_in for f in result.files)
         result.records_preserved = all(f.records_preserved for f in result.files)
         # Chunks are always built from a single file, so files can never mix.
@@ -237,6 +239,7 @@ class DatasetCleaner:
         summary.chunks_total = len(chunks)
 
         cleaned_records: List[Dict[str, Any]] = []
+        position = 0
         # Chunks are produced from this file only -> records can never mix files.
         for index, chunk in enumerate(chunks, start=1):
             cleaned_chunk, chunk_summary = await self._clean_chunk(
@@ -247,13 +250,23 @@ class DatasetCleaner:
                 fmt=fmt,
                 use_llm=use_llm,
             )
+            chunk_summary.first_record = position + 1
+            chunk_summary.last_record = position + len(chunk)
+            position += len(chunk)
             summary.chunk_summaries.append(chunk_summary)
-            summary.warnings.extend(chunk_summary.warnings)
             if chunk_summary.llm_used:
                 summary.chunks_cleaned += 1
             else:
                 summary.chunks_fallback += 1
             cleaned_records.extend(cleaned_chunk)
+
+        # One concise summary per file instead of one warning per chunk.
+        summary.failure_summary = summarize_failures(summary.chunk_summaries)
+        if summary.failure_summary:
+            summary.warnings.append(describe_failures(path.name, summary.failure_summary, len(chunks)))
+        notes = _unique_notes(summary.chunk_summaries)
+        if notes:
+            summary.warnings.append("Model notes: " + "; ".join(notes))
 
         summary.records_out = len(cleaned_records)
         summary.records_preserved = len(cleaned_records) == len(records)
@@ -295,7 +308,7 @@ class DatasetCleaner:
         summary = ChunkCleaningSummary(chunk_index=chunk_index, record_count=len(chunk))
 
         if use_llm and self.llm_available:
-            candidates, warnings, used = await self._call_llm_for_chunk(
+            candidates, warnings, used, reason, notes = await self._call_llm_for_chunk(
                 chunk=chunk,
                 file_name=file_name,
                 chunk_index=chunk_index,
@@ -310,11 +323,15 @@ class DatasetCleaner:
                 summary.status = "cleaned"
                 summary.llm_used = True
                 summary.records_cleaned = len(merged)
-                summary.warnings.extend(warnings)
+                summary.notes = notes
                 return merged, summary
 
+            # The model's answer was unusable: keep these records exactly as
+            # they were. They are reported once, in the file's summary.
             summary.status = "fallback"
+            summary.failure_reason = reason or "unparsable"
             summary.warnings.extend(warnings)
+            return [dict(record) for record in chunk], summary
         else:
             summary.status = "deterministic"
 
@@ -329,11 +346,13 @@ class DatasetCleaner:
         chunk_index: int,
         chunk_total: int,
         fmt: str,
-    ) -> Tuple[Optional[List[Dict[str, Any]]], List[str], bool]:
+    ) -> Tuple[Optional[List[Dict[str, Any]]], List[str], bool, Optional[str], List[str]]:
         """Send exactly one chunk to the LLM and validate the returned records.
 
-        Returns ``(records, warnings, accepted)``.  ``accepted`` is False when
-        the request failed or the response broke the record contract.
+        Returns ``(records, warnings, accepted, failure_reason, notes)``.
+        ``accepted`` is False when the request failed or the response broke the
+        record contract; ``failure_reason`` is then ``"prompt"``,
+        ``"unparsable"`` or ``"contract"``.
         """
         warnings: List[str] = []
         try:
@@ -349,7 +368,7 @@ class DatasetCleaner:
             system_prompt = self._llm.load_prompt(*_CLEANING_SYSTEM_PROMPT)
         except Exception as e:  # noqa: BLE001 - prompt loading must not abort the run
             warnings.append(f"Chunk {chunk_index}: cleaning prompt unavailable ({e}).")
-            return None, warnings, False
+            return None, warnings, False, "prompt", []
 
         payload = await self._llm.call_structured(
             prompt, temperature=0.1, system_prompt=system_prompt
@@ -358,7 +377,7 @@ class DatasetCleaner:
             warnings.append(
                 f"Chunk {chunk_index}: LLM returned no parsable JSON; original records kept."
             )
-            return None, warnings, False
+            return None, warnings, False, "unparsable", []
 
         candidates = None
         for key in ("records", "items", "data"):
@@ -375,13 +394,14 @@ class DatasetCleaner:
                 f"Chunk {chunk_index}: LLM violated the record contract "
                 f"(expected {len(chunk)} records, got {got}); original records kept."
             )
-            return None, warnings, False
+            return None, warnings, False, "contract", []
 
-        for note in payload.get("warnings", []) or []:
-            if isinstance(note, str) and note.strip():
-                warnings.append(f"Chunk {chunk_index}: {note.strip()}")
-
-        return candidates, warnings, True
+        notes = [
+            note.strip()[:200]
+            for note in (payload.get("warnings", []) or [])
+            if isinstance(note, str) and note.strip()
+        ]
+        return candidates, warnings, True, None, notes
 
     def _merge_record(
         self, original: Dict[str, Any], cleaned: Dict[str, Any]
@@ -446,6 +466,90 @@ def _clean_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_clean_value(item) for item in value]
     return value
+
+
+_REASON_TEXT = {
+    "unparsable": "unparsable AI output",
+    "contract": "AI output that broke the record contract",
+    "prompt": "an unavailable cleaning prompt",
+}
+
+
+def _ranges(chunks: List[ChunkCleaningSummary], limit: int = 4) -> str:
+    parts = [f"{c.first_record}–{c.last_record}" for c in chunks[:limit]]
+    more = len(chunks) - limit
+    return ", ".join(parts) + (f" and {more} more range(s)" if more > 0 else "")
+
+
+def summarize_failures(chunks: List[ChunkCleaningSummary]) -> Dict[str, Any]:
+    """Aggregate skipped AI chunks: counts by reason and the record ranges kept as-is."""
+    failed = [c for c in chunks if c.status == "fallback"]
+    if not failed:
+        return {}
+    by_reason: Dict[str, int] = {}
+    for chunk in failed:
+        key = chunk.failure_reason or "unparsable"
+        by_reason[key] = by_reason.get(key, 0) + 1
+    return {
+        "chunksFailed": len(failed),
+        "recordsKeptOriginal": sum(c.record_count for c in failed),
+        "byReason": by_reason,
+        "recordRanges": _ranges(failed),
+    }
+
+
+def describe_failures(name: str, summary: Dict[str, Any], chunks_total: int) -> str:
+    reasons = ", ".join(
+        f"{count} x {_REASON_TEXT.get(reason, reason)}" for reason, count in summary["byReason"].items()
+    )
+    return (
+        f"{name}: {summary['chunksFailed']} of {chunks_total} chunk(s) could not be cleaned by the AI "
+        f"({reasons}). Their {summary['recordsKeptOriginal']} record(s) (records {summary['recordRanges']}) "
+        "were kept unchanged."
+    )
+
+
+def merge_failure_summaries(summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    present = [s for s in summaries if s]
+    if not present:
+        return {}
+    by_reason: Dict[str, int] = {}
+    for item in present:
+        for reason, count in item["byReason"].items():
+            by_reason[reason] = by_reason.get(reason, 0) + count
+    return {
+        "chunksFailed": sum(s["chunksFailed"] for s in present),
+        "recordsKeptOriginal": sum(s["recordsKeptOriginal"] for s in present),
+        "byReason": by_reason,
+        "filesAffected": len(present),
+    }
+
+
+def describe_result(result: "DatasetCleaningResult") -> str:
+    """One short paragraph for the chat: what was cleaned, what was skipped."""
+    method = "AI-assisted" if result.llm_used else "script-based"
+    text = (
+        f"Cleaned {result.total_files} file(s) / {result.total_records_out} record(s) "
+        f"({method}); no records were dropped or reordered."
+        if result.records_preserved
+        else f"Cleaned {result.total_files} file(s), but the record counts did not match - review the result."
+    )
+    failures = result.failure_summary
+    if failures:
+        text += (
+            f" The AI output was unusable for {failures['chunksFailed']} of {result.total_chunks} chunk(s) in "
+            f"{failures['filesAffected']} file(s); {failures['recordsKeptOriginal']} record(s) were kept unchanged."
+        )
+    return text
+
+
+def _unique_notes(chunks: List[ChunkCleaningSummary], limit: int = 3) -> List[str]:
+    seen: Dict[str, int] = {}
+    for chunk in chunks:
+        for note in chunk.notes:
+            seen[note] = seen.get(note, 0) + 1
+    ranked = sorted(seen.items(), key=lambda item: -item[1])[:limit]
+    return [f"{note} (x{count})" if count > 1 else note for note, count in ranked]
 
 
 def count_empty_text_records(records: List[Dict[str, Any]]) -> int:

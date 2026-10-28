@@ -24,4 +24,5 @@ class ContextBuilder:
             inference_scripts=scan_result.get("inference_scripts", []),
             hardware_information=scan_result.get("hardware_information", {}),
             project_statistics=scan_result.get("project_statistics", {}),
+            training_insights=scan_result.get("training_insights", {}),
         )
