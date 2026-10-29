@@ -10,6 +10,7 @@ import { ChatWebviewProvider } from './views/chatWebviewProvider';
 import { SettingsWebviewProvider } from './views/settingsWebviewProvider';
 import { generateReportHtml, formatError } from './utils';
 import { requireProjectRoot } from './services/projectRoot';
+import { syncPermissions } from './services/permissions';
 import { OVERVIEW_VIEW_ID, CHAT_VIEW_ID, REPORTS_VIEW_ID, SETTINGS_VIEW_ID } from './views/viewIds';
 
 export async function activate(context: vscode.ExtensionContext) {
@@ -32,10 +33,27 @@ export async function activate(context: vscode.ExtensionContext) {
     // single failed start (e.g. backend still unpacking on first run) would
     // make every button in the window fail until the user reloaded VS Code.
     let startupPromise: Promise<boolean> | null = null;
+
+    const pushPermissions = async (): Promise<void> => {
+      try {
+        await syncPermissions(apiClient);
+      } catch (error) {
+        console.error('Could not sync permissions to the backend:', formatError(error));
+        vscode.window.showWarningMessage(
+          'LLM Training Agent: your permission settings could not be sent to the backend. ' +
+            'The backend keeps its previous permissions until this succeeds.'
+        );
+      }
+    };
     const ensureBackend = (): Promise<boolean> => {
       if (!startupPromise) {
         startupPromise = backendManager.ensureRunning().then(
-          (ok) => {
+          async (ok) => {
+            if (ok) {
+              // The backend enforces the permissions, so it must know the user's current
+              // choices before the first request that reads or writes project files.
+              await pushPermissions();
+            }
             if (!ok) {
               startupPromise = null;
               vscode.window.showWarningMessage(
@@ -70,6 +88,20 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         backendManager.refreshAllowedRoots();
+        if (startupPromise) {
+          void pushPermissions();
+        }
+      }),
+      // Settings → Permissions changes and workspace-trust changes take effect immediately.
+      vscode.workspace.onDidChangeConfiguration((event) => {
+        if (startupPromise && event.affectsConfiguration('llmTrainingAgent.permissions')) {
+          void pushPermissions();
+        }
+      }),
+      vscode.workspace.onDidGrantWorkspaceTrust(() => {
+        if (startupPromise) {
+          void pushPermissions();
+        }
       })
     );
 
@@ -113,7 +145,7 @@ export async function activate(context: vscode.ExtensionContext) {
     // --- Commands ---
     registerAnalyzerCommands(context, apiClient, settings, overviewProvider, chatProvider, ensureBackend, backendManager);
     registerChatCommands(context, apiClient, settings, ensureBackend);
-    registerChangeCommands(context, apiClient, ensureBackend);
+    registerChangeCommands(context, chatProvider);
     context.subscriptions.push(
       vscode.commands.registerCommand('llmTrainingAgent.configureProvider', async () => {
         await settingsProvider.reveal();

@@ -25,6 +25,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from analysis.project_findings import render_findings
+
 from models.schemas import (
     BudgetOption,
     CompleteAnalysis,
@@ -92,6 +94,7 @@ class AnalysisOrchestrator:
         use_case: Optional[UseCaseAnalysisResult] = None,
         failures: Optional[List[Dict[str, Any]]] = None,
         analysis_status: str = "unknown",
+        findings: Optional[Dict[str, Any]] = None,
     ) -> CompleteAnalysis:
         """Assemble the complete analysis from the pipeline's real outputs."""
         failures = failures or []
@@ -128,6 +131,7 @@ class AnalysisOrchestrator:
             risks=self._risks(results, prediction, hardware_section, context, use_case),
             recommendations=[self._recommendation_dict(r) for r in (recommendations or [])],
             next_experiment=self._next_experiment(use_case, results, model, training),
+            project_findings=findings,
             model_information_notice=REFERENCE_DATA_NOTICE,
             unavailable_sections=unavailable,
         )
@@ -931,15 +935,15 @@ class AnalysisOrchestrator:
             )
             out.append("")
 
-        self._render_project_understanding(out, analysis.project_understanding)
+        self._render_project_understanding(out, analysis.project_understanding, analysis.project_findings)
         self._render_use_case(out, analysis.use_case)
         self._render_dataset(out, analysis.dataset_analysis)
         self._render_prompt(out, analysis.prompt_analysis)
         self._render_models(out, analysis)
-        self._render_hardware(out, analysis.hardware)
+        self._render_hardware(out, analysis.hardware, analysis.project_findings)
         self._render_training(out, analysis.training_configuration)
-        self._render_timing(out, analysis.training_time_estimate)
-        self._render_cost(out, analysis.cost_estimate, analysis.budget)
+        self._render_timing(out, analysis.training_time_estimate, analysis.project_findings)
+        self._render_cost(out, analysis.cost_estimate, analysis.budget, analysis.project_findings)
         self._render_approach(out, analysis.approach_recommendation)
         self._render_behavior(out, analysis.expected_behavior)
         self._render_risks(out, analysis.risks)
@@ -949,32 +953,33 @@ class AnalysisOrchestrator:
         self._render_notice(out, analysis.model_information_notice)
         return "\n".join(out).rstrip() + "\n"
 
-    def _render_project_understanding(self, out: List[str], section: Optional[Dict[str, Any]]) -> None:
+    def _render_project_understanding(self, out: List[str], section: Optional[Dict[str, Any]],
+                                      findings: Optional[Dict[str, Any]] = None) -> None:
         out.append("## 1. Project Understanding")
         if not section:
             out.append("\n_Project discovery unavailable._\n")
             return
-        out.extend([
-            "",
-            f"- **Project:** {section.get('project_name')}",
-            f"- **Framework:** {section.get('detected_framework')}",
-            f"- **Base model:** {section.get('base_model')}",
-            f"- **Files inspected:** {section.get('file_count')}",
-        ])
-        for label, key in (
-            ("Dataset files", "dataset_files"),
-            ("Prompt templates", "prompt_templates"),
-            ("Config files", "configuration_files"),
-            ("Training scripts", "training_scripts"),
-            ("Evaluation scripts", "evaluation_scripts"),
-            ("Inference scripts", "inference_scripts"),
-        ):
+        out.append("")
+        if findings:
+            # Read from the code itself: model, method, settings, runtime (with file:line).
+            out.extend(render_findings(findings))
+        else:
+            out.extend([
+                f"- **Project:** {section.get('project_name')}",
+                f"- **Framework:** {section.get('detected_framework')}",
+                f"- **Base model:** {section.get('base_model')}",
+            ])
+            scripts = section.get("training_scripts") or []
+            out.append("- **Training scripts:** " + (", ".join(str(v) for v in scripts[:5]) or "none found"))
+        extras = []
+        for label, key in (("Evaluation", "evaluation_scripts"), ("Inference", "inference_scripts"),
+                           ("Prompt templates", "prompt_templates"), ("Config files", "configuration_files")):
             values = section.get(key) or []
-            out.append(
-                f"- **{label}:** {len(values)}"
-                + (f" — {', '.join(str(v) for v in values[:5])}" if values else " — none found")
-            )
-        out.append(f"\n_{section.get('note')}_\n")
+            if values:
+                extras.append(f"{label}: " + ", ".join(f"`{v}`" for v in values[:3]))
+        if extras:
+            out.append("- **Other files:** " + "; ".join(extras))
+        out.append("")
 
     def _render_use_case(self, out: List[str], use_case: Any) -> None:
         out.append("## 2. Identified Use Case")
@@ -1085,41 +1090,44 @@ class AnalysisOrchestrator:
                 f"- **COST CONSIDERATIONS:** {candidate.cost_considerations}",
                 f"- **BEST USE CASE:** {candidate.best_use_case}",
             ])
-        out.append("\n_No model is universally best — the right choice depends on your task, "
-                   "hardware and budget._\n")
+        out.append("")
 
         out.append("## 6. Model Comparison")
         if not analysis.model_comparison:
             out.append("\n_Model comparison unavailable._\n")
             return
+        if len(analysis.model_candidates) <= 1:
+            out.append("\n_Only the model your project already uses is on the table, so there is "
+                       "nothing to compare. Ask me to compare alternatives if you want to switch._\n")
+            return
         out.append("")
-        for key, value in (analysis.model_comparison.get("expected_tendencies") or {}).items():
+        for key, value in list((analysis.model_comparison.get("expected_tendencies") or {}).items())[:4]:
             out.append(f"- **{key.replace('_', ' ').title()}:** {value}")
         out.append(f"\n_{analysis.model_comparison.get('disclaimer')}_\n")
 
-    def _render_hardware(self, out: List[str], section: Optional[Dict[str, Any]]) -> None:
+    def _render_hardware(self, out: List[str], section: Optional[Dict[str, Any]],
+                         findings: Optional[Dict[str, Any]] = None) -> None:
         out.append("## 7. Hardware / GPU Requirements")
-        if not section:
-            out.append(
-                "\n_Hardware analysis unavailable — no GPU could be detected on this machine, "
-                "so VRAM feasibility cannot be confirmed._\n"
-            )
+        hw = (findings or {}).get("hardware") or {}
+        if hw.get("gpu"):
+            vram = f", {hw['vram_gb']:g} GB VRAM" if hw.get("vram_gb") else ""
+            out.append(f"\n- **GPU used for the estimate:** {hw['gpu']}{vram} "
+                       f"({hw.get('mode')} GPU, {hw.get('source')})")
+            t = (findings or {}).get("time") or {}
+            if t.get("vram_estimated_gb") and t.get("vram_available_gb"):
+                verdict = "should fit" if t.get("vram_feasible") else "may not fit"
+                out.append(f"- **Memory:** about {t['vram_estimated_gb']:.1f} GB needed vs "
+                           f"{t['vram_available_gb']:.0f} GB available, {verdict}.")
+            out.append("")
             return
-        out.append("\n**ACTUAL HARDWARE:**")
-        if section.get("gpu_count"):
-            for gpu in section.get("gpus", []):
-                out.append(
-                    f"- GPU {gpu.get('index')}: {gpu.get('name')}, "
-                    f"{gpu.get('vram_gb') or 'unknown'} GB VRAM"
-                )
-            out.append(f"- CUDA available: {section.get('cuda_available')}")
-        else:
-            out.append("- No CUDA GPU detected on this machine.")
-        out.append(f"- Detection method: {section.get('detection_method')}")
-        out.append("\n**FEASIBILITY:** see the training-time section for the VRAM estimate "
-                   "against detected capacity.")
-        out.append("\n_ASSUMPTIONS: the model size comes from reference data matched on the "
-                   "model name, not from a measured file size._\n")
+        if not section or not section.get("gpu_count"):
+            notes = " ".join(hw.get("notes") or []) or "No CUDA GPU was detected on this machine."
+            out.append(f"\n_{notes} Memory feasibility cannot be confirmed without a GPU._\n")
+            return
+        out.append("")
+        for gpu in section.get("gpus", []):
+            out.append(f"- GPU {gpu.get('index')}: {gpu.get('name')}, {gpu.get('vram_gb') or 'unknown'} GB VRAM")
+        out.append("")
 
     def _render_training(self, out: List[str], section: Optional[Dict[str, Any]]) -> None:
         out.append("## 8. Training Configuration")
@@ -1137,7 +1145,7 @@ class AnalysisOrchestrator:
 
         recommended = section.get("recommended_starting_point") or {}
         if recommended:
-            out.append("\n**RECOMMENDED STARTING POINT (heuristics, each explained):**")
+            out.append("\n**RECOMMENDED STARTING POINT (heuristics; only values that differ from your files):**")
             out.append(f"- Method: {recommended.get('method')}")
             for key, reason_key in (
                 ("learning_rate", "learning_rate_reason"),
@@ -1150,59 +1158,72 @@ class AnalysisOrchestrator:
                 ("gradient_checkpointing", "gradient_checkpointing_reason"),
                 ("quantization", "quantization_reason"),
             ):
+                if str(current.get(key)) == str(recommended.get(key)):
+                    continue
                 out.append(f"- {key}: {recommended.get(key)} — {recommended.get(reason_key)}")
         out.append("")
 
-    def _render_timing(self, out: List[str], section: Optional[Dict[str, Any]]) -> None:
+    def _render_timing(self, out: List[str], section: Optional[Dict[str, Any]],
+                       findings: Optional[Dict[str, Any]] = None) -> None:
         out.append("## 9. Estimated Training Time")
+        t = (findings or {}).get("time")
+        if t:
+            inputs = (findings or {}).get("time_inputs") or {}
+            out.extend([
+                "",
+                f"**ESTIMATED TRAINING TIME:** about {t['human']} (likely {t['range']})",
+                f"- Basis: {t['total_steps']:,} steps, {inputs.get('epochs')} epoch(s), effective batch "
+                f"{inputs.get('effective_batch_size')}, sequence length {inputs.get('sequence_length')}, "
+                f"{inputs.get('method')} on {(findings or {}).get('hardware', {}).get('gpu')}.",
+                f"- Confidence: {t['confidence']}. This is a FLOPs-based model, not a benchmark; real runs "
+                "vary with data loading, padding and checkpointing.",
+            ])
+            for warning in t.get("warnings") or []:
+                out.append(f"- Warning: {warning}")
+            out.append("")
+            return
+        missing = (findings or {}).get("missing") or []
+        if missing:
+            out.append("\n_No runtime estimate: needs " + "; ".join(missing) + "._\n")
+            return
         if not section:
-            out.append(
-                "\n_Training time unavailable — a GPU must be detected to project wall-clock "
-                "time. Missing inputs: detected GPU and its throughput._\n"
-            )
+            out.append("\n_Training time unavailable._\n")
             return
         out.extend([
             "",
             f"**ESTIMATED TRAINING TIME:** {section.get('estimated_time')}",
             f"- **EXPECTED RANGE:** {section.get('expected_range')}",
-            f"- Total steps: {section.get('total_steps')}",
             f"- Confidence: {section.get('confidence')} ({section.get('mode')} estimate)",
-            f"- VRAM feasible: {section.get('vram_feasible')} "
-            f"(estimated {section.get('vram_estimated_gb')} GB vs "
-            f"{section.get('vram_available_gb')} GB available)",
+            "",
         ])
-        if section.get("warnings"):
-            out.append("\n**Warnings:**")
-            out.extend(f"- {item}" for item in section["warnings"][:5])
-        out.append(f"\n**ASSUMPTIONS:** {'; '.join(section.get('assumptions', [])[:5]) or 'none recorded'}")
-        out.append(f"\n**UNCERTAINTY:** {section.get('uncertainty')}\n")
 
     def _render_cost(self, out: List[str], cost: Optional[Dict[str, Any]],
-                     budget: Optional[Dict[str, Any]]) -> None:
+                     budget: Optional[Dict[str, Any]],
+                     findings: Optional[Dict[str, Any]] = None) -> None:
         out.append("## 10. Cost Estimate")
-        if cost:
+        hw = (findings or {}).get("hardware") or {}
+        mode = hw.get("mode")
+        fcost = (findings or {}).get("cost")
+        if fcost:
             out.extend([
                 "",
-                f"- **Training time:** {cost.get('estimated_training_time')}",
-                f"- **GPU-hours:** {cost.get('estimated_gpu_hours')}",
-                f"- **VRAM usage:** {cost.get('estimated_vram_usage')}",
-                f"- **Checkpoint size:** {cost.get('estimated_checkpoint_size')}",
-                f"- **Storage:** {cost.get('estimated_storage_requirement')}",
-                f"- **Confidence:** {cost.get('confidence')}",
-                f"\n_{cost.get('note')}_",
+                f"- **Estimated GPU cost:** about ${fcost['estimate_usd']:,.2f} "
+                f"(${fcost['low_usd']:,.2f} to ${fcost['high_usd']:,.2f}) at "
+                f"${fcost['hourly_rate_usd']:,.2f}/GPU-hour x {fcost['gpu_count']} GPU(s)",
             ])
-        else:
-            out.append("\n_Cost estimation unavailable._")
-        if not budget:
+            out.extend(f"  - {a}" for a in fcost["assumptions"])
+            out.append("")
             return
-        out.append(f"\n**Budget constraint:** {budget.get('budget_constraint')}")
-        out.append("")
-        for option in budget.get("options", []):
-            out.append(f"- **{option.get('tier')}:** {option.get('approach')} — {option.get('rationale')}")
-        out.append("\n**Cost drivers:**")
-        out.extend(f"- {driver}" for driver in budget.get("cost_drivers", []))
-        out.append(f"\n_{budget.get('pricing_note')}_")
-        out.append(f"\n_{budget.get('local_inference_note')}_\n")
+        if mode == "local":
+            out.append("\n_Training runs on your own GPU, so there is no rental cost. "
+                       "Only electricity and your time apply._\n")
+            return
+        if mode == "cloud":
+            out.append("\n_No cost shown: it needs the hourly rate of your cloud GPU "
+                       "(for example \"I use an A100 at $1.89/hr\"). No price is assumed._\n")
+            return
+        out.append("\n_No cost shown: no GPU was detected and none was stated. Tell me where you train "
+                   "(local GPU, or cloud GPU with its hourly rate)._\n")
 
     def _render_approach(self, out: List[str], section: Optional[Dict[str, Any]]) -> None:
         out.append("## 11. Fine-tuning vs RAG vs Prompting")

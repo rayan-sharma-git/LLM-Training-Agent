@@ -305,14 +305,18 @@ async def test_no_provider_applies_deterministic_cleaning(tmp_path):
 # ----------------------------------------------------------------------
 
 @pytest.fixture
-def api_client():
+def api_client(tmp_path):
     """Sync FastAPI test client (same pattern as tests/test_api.py)."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
     app = FastAPI()
     app.include_router(router, prefix="/api/v1")
-    return TestClient(app)
+    client = TestClient(app)
+    # Cleaning writes files, which is off by default (Settings -> Permissions).
+    client.put("/api/v1/agent/permissions", json={
+        "projectPath": str(tmp_path), "permissions": {"readFiles": True, "writeFiles": True}})
+    return client
 
 
 def test_clean_endpoint_accepts_explicit_dataset_paths(api_client, tmp_path):

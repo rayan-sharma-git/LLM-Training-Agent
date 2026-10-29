@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { ApiClient } from '../services/apiClient';
 import { SettingsManager } from '../services/settings';
 import { escapeJsString, formatError } from '../utils';
+import { PERMISSION_KEYS, normalizePermissions, normalizeHardware } from '../services/permissionPolicy';
+import { readPermissionSettings, readHardwareSettings, syncPermissions } from '../services/permissions';
 import { SETTINGS_VIEW_ID } from './viewIds';
 
 export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
@@ -144,6 +146,14 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
               await this._refreshModels(provider);
               break;
             }
+            case 'setPermission': {
+              await this._setPermission(message.key, message.value);
+              break;
+            }
+            case 'saveHardware': {
+              await this._saveHardware(message.hardware);
+              break;
+            }
           }
         } catch (error) {
           console.error(
@@ -155,6 +165,46 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       },
       null,
       this._disposables
+    );
+  }
+
+  /**
+   * Store one permission toggle at the user level and push it to the backend that enforces it.
+   * Only a real boolean is accepted, so a malformed message can never switch anything on.
+   */
+  private async _setPermission(key: unknown, value: unknown): Promise<void> {
+    if (typeof key !== 'string' || !(PERMISSION_KEYS as readonly string[]).includes(key) || typeof value !== 'boolean') {
+      return;
+    }
+    await vscode.workspace
+      .getConfiguration('llmTrainingAgent.permissions')
+      .update(key, value, vscode.ConfigurationTarget.Global);
+    try {
+      await this._ensureBackendReady();
+      await syncPermissions(this._apiClient);
+      this._postStatus('Permissions saved.', false);
+    } catch (error) {
+      this._postStatus(`Saved in settings, but the backend was not updated: ${formatError(error)}`, true);
+    }
+    void this._view?.webview.postMessage({ command: 'permissions', values: readPermissionSettings(), trusted: vscode.workspace.isTrusted !== false });
+  }
+
+  private async _saveHardware(raw: unknown): Promise<void> {
+    const hardware = normalizeHardware(raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {});
+    const config = vscode.workspace.getConfiguration('llmTrainingAgent.hardware');
+    const target = vscode.ConfigurationTarget.Global;
+    await config.update('mode', hardware.mode, target);
+    await config.update('gpuName', hardware.gpuName, target);
+    await config.update('hourlyRateUsd', hardware.hourlyRateUsd, target);
+    await config.update('provider', hardware.provider, target);
+    await config.update('gpuCount', hardware.gpuCount, target);
+    this._postStatus(
+      hardware.mode === 'local'
+        ? 'Hardware saved. Local GPU: no rental cost is shown.'
+        : hardware.mode === 'cloud' && !hardware.hourlyRateUsd
+          ? 'Hardware saved. Add an hourly rate to get a cost estimate.'
+          : 'Hardware saved.',
+      false
     );
   }
 
@@ -261,7 +311,10 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
           this._view.webview,
           activeProvider,
           activeModel,
-          providerStates
+          providerStates,
+          readPermissionSettings(),
+          readHardwareSettings(),
+          vscode.workspace.isTrusted !== false
         );
       }
     } catch (error) {
@@ -273,7 +326,10 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     webview: vscode.Webview,
     activeProvider: string,
     activeModel: string,
-    providerStates: Record<string, any>
+    providerStates: Record<string, any>,
+    permissions: ReturnType<typeof normalizePermissions>,
+    hardware: ReturnType<typeof normalizeHardware>,
+    trusted: boolean
   ): string {
     // Same service-worker CSP contract as the chat view: VS Code bootstraps
     // every webview through an internal worker, and `default-src 'none'`
@@ -412,6 +468,13 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     .status.ok { background: #e6f4ea; border: 1px solid #a3cf82; color: #31a354; }
     .status.error { background: #fce8e6; border: 1px solid #e5a9a9; color: #e57373; }
 
+    .perm { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; }
+    .perm input { margin-top: 3px; flex: 0 0 auto; }
+    .perm .perm-name { font-size: 13px; font-weight: 600; }
+    .perm .perm-desc { font-size: 11px; color: var(--vscode-descriptionForeground); }
+    .perm.risky .perm-name { color: #b3261e; }
+    .warn { padding: 8px; border-radius: 4px; margin: 6px 0 10px; font-size: 12px; background: #fff4e5; border: 1px solid #f0b34a; color: #7a4b00; }
+    .warn.untrusted { background: #fce8e6; border-color: #e5a9a9; color: #8a1c14; }
     .provider-description { font-size: 12px; color: var(--vscode-descriptionForeground); margin-bottom: 8px; }
   </style>
 </head>
@@ -464,12 +527,43 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
     <button class="btn btn-secondary" id="refreshModelsBtn">Refresh Models</button>
   </div>
 
+  <div class="section" id="permissionsSection">
+    <div class="section-title">Permissions</div>
+    <div class="note" style="margin-bottom:8px;">Each permission is independent. Anything turned off is refused by the backend, and the chat asks you (Allow / Deny) before it needs it.</div>
+    <div id="untrustedWarning" class="warn untrusted" style="display:none;">This workspace is not trusted, so writing files and running commands are disabled regardless of these settings.</div>
+    <label class="perm"><input type="checkbox" id="perm-readFiles" /><span><span class="perm-name">Read files</span><br><span class="perm-desc">Read project files for analysis, dataset inspection and finding settings.</span></span></label>
+    <label class="perm"><input type="checkbox" id="perm-writeFiles" /><span><span class="perm-name">Write files</span><br><span class="perm-desc">Edit settings, clean data, merge cleaned data and revert changes. Backups are kept.</span></span></label>
+    <label class="perm"><input type="checkbox" id="perm-safeCommands" /><span><span class="perm-name">Run safe terminal commands</span><br><span class="perm-desc">Read-only commands such as ls, git status, git diff, pip list and nvidia-smi, without asking each time.</span></span></label>
+    <label class="perm risky"><input type="checkbox" id="perm-unrestrictedCommands" /><span><span class="perm-name">Run unrestricted terminal commands</span><br><span class="perm-desc">Any command except a short list of destructive ones that are always blocked.</span></span></label>
+    <div id="unrestrictedConfirm" class="warn" style="display:none;">
+      Unrestricted commands can change or delete files and install software without asking you first. Enable only if you trust the agent on this machine.
+      <div style="margin-top:6px;"><button class="btn btn-danger" id="unrestrictedYes">Enable anyway</button><button class="btn btn-secondary" id="unrestrictedNo">Cancel</button></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Training Hardware</div>
+    <div class="note" style="margin-bottom:8px;">Used for the time and cost estimates. A cost is only shown for a cloud GPU with an hourly rate you enter.</div>
+    <div class="form-row label-first"><label for="hwMode">Where:</label>
+      <select id="hwMode"><option value="auto">Detect automatically</option><option value="local">My own GPU (local)</option><option value="cloud">Rented cloud GPU</option></select></div>
+    <div class="form-row"><label for="hwGpu">GPU name (optional)</label><input type="text" id="hwGpu" placeholder="as shown by nvidia-smi" /></div>
+    <div class="form-row" id="hwCloudRows">
+      <label for="hwRate">Hourly rate (USD)</label><input type="number" id="hwRate" min="0" step="0.01" placeholder="e.g. the price your provider lists" />
+      <label for="hwProvider">Provider (optional)</label><input type="text" id="hwProvider" />
+      <label for="hwCount">Number of GPUs</label><input type="number" id="hwCount" min="1" max="64" step="1" />
+    </div>
+    <button class="btn btn-primary" id="saveHardwareBtn">Save Hardware</button>
+  </div>
+
   <script>
     const vscode = acquireVsCodeApi();
 
     let currentProvider = '${escapeJsString(activeProvider)}';
     let currentModel = '${escapeJsString(activeModel)}';
     const providerStates = ${JSON.stringify(providerStates)};
+    const initialPermissions = ${JSON.stringify(permissions)};
+    const initialHardware = ${JSON.stringify(hardware)};
+    const workspaceTrusted = ${trusted ? 'true' : 'false'};
 
     const providerDescriptions = {
       ollama: 'Fully local. No API key required. Models are downloaded and run on your machine.',
@@ -617,6 +711,75 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       });
     }
 
+    function applyPermissions(values, trusted) {
+      ['readFiles', 'writeFiles', 'safeCommands', 'unrestrictedCommands'].forEach(function (key) {
+        var box = document.getElementById('perm-' + key);
+        if (box) {
+          box.checked = !!values[key];
+          // Without a trusted workspace only reading can be on; the extension enforces this too.
+          box.disabled = !trusted && key !== 'readFiles';
+        }
+      });
+      document.getElementById('untrustedWarning').style.display = trusted ? 'none' : 'block';
+    }
+
+    function initPermissionsUi() {
+      applyPermissions(initialPermissions, workspaceTrusted);
+      ['readFiles', 'writeFiles', 'safeCommands'].forEach(function (key) {
+        document.getElementById('perm-' + key).addEventListener('change', function () {
+          vscode.postMessage({ command: 'setPermission', key: key, value: this.checked });
+        });
+      });
+      var unrestricted = document.getElementById('perm-unrestrictedCommands');
+      var confirmBox = document.getElementById('unrestrictedConfirm');
+      unrestricted.addEventListener('change', function () {
+        if (this.checked) {
+          // Never switch the risky option on without an explicit second click.
+          this.checked = false;
+          confirmBox.style.display = 'block';
+        } else {
+          confirmBox.style.display = 'none';
+          vscode.postMessage({ command: 'setPermission', key: 'unrestrictedCommands', value: false });
+        }
+      });
+      document.getElementById('unrestrictedYes').addEventListener('click', function () {
+        confirmBox.style.display = 'none';
+        unrestricted.checked = true;
+        vscode.postMessage({ command: 'setPermission', key: 'unrestrictedCommands', value: true });
+      });
+      document.getElementById('unrestrictedNo').addEventListener('click', function () {
+        confirmBox.style.display = 'none';
+      });
+    }
+
+    function showHardwareFields() {
+      var cloud = document.getElementById('hwMode').value === 'cloud';
+      document.getElementById('hwCloudRows').style.display = cloud ? 'flex' : 'none';
+    }
+
+    function initHardwareUi() {
+      document.getElementById('hwMode').value = initialHardware.mode;
+      document.getElementById('hwGpu').value = initialHardware.gpuName || '';
+      document.getElementById('hwRate').value = initialHardware.hourlyRateUsd || '';
+      document.getElementById('hwProvider').value = initialHardware.provider || '';
+      document.getElementById('hwCount').value = initialHardware.gpuCount || 1;
+      showHardwareFields();
+      document.getElementById('hwMode').addEventListener('change', showHardwareFields);
+      document.getElementById('saveHardwareBtn').addEventListener('click', function () {
+        var rate = parseFloat(document.getElementById('hwRate').value);
+        vscode.postMessage({
+          command: 'saveHardware',
+          hardware: {
+            mode: document.getElementById('hwMode').value,
+            gpuName: document.getElementById('hwGpu').value,
+            hourlyRateUsd: isFinite(rate) && rate > 0 ? rate : null,
+            provider: document.getElementById('hwProvider').value,
+            gpuCount: parseInt(document.getElementById('hwCount').value, 10) || 1,
+          },
+        });
+      });
+    }
+
     // Init
     // Called immediately: this script runs after the elements above, and a
     // DOMContentLoaded wrapper is unreliable here — the webview document may
@@ -638,6 +801,9 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       document.getElementById('removeKeyBtn').addEventListener('click', removeApiKey);
       document.getElementById('refreshModelsBtn').addEventListener('click', refreshModels);
 
+      initPermissionsUi();
+      initHardwareUi();
+
       document.getElementById('apiKeyInput').addEventListener('input', function () {
         if (this.value.trim()) {
           setStatus('API key entered — clicking Save stores it securely.', false);
@@ -654,6 +820,9 @@ export class SettingsWebviewProvider implements vscode.WebviewViewProvider {
       var message = event.data;
       if (message && message.command === 'showStatus') {
         setStatus(message.text || '', !!message.isError);
+      }
+      if (message && message.command === 'permissions' && message.values) {
+        applyPermissions(message.values, message.trusted !== false);
       }
     });
     initSettingsUi();

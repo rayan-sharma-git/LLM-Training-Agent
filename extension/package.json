@@ -13,8 +13,18 @@
     "url": "https://github.com/rayan-sharma-git/llm-training-agent/issues"
   },
   "license": "MIT",
-  "keywords": ["llm", "fine-tuning", "training", "ai", "machine-learning"],
-  "categories": ["Machine Learning", "Data Science"],
+  "keywords": [
+    "llm",
+    "fine-tuning",
+    "training",
+    "ai",
+    "machine-learning"
+  ],
+  "categories": [
+    "Machine Learning",
+    "Data Science"
+  ],
+  "icon": "resources/icon.png",
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:llmTrainingAgent.overview",
@@ -187,6 +197,69 @@
           "default": "llama3.2",
           "scope": "application",
           "description": "LLM model name. User-level: it applies to every project and is never stored in a project."
+        },
+        "llmTrainingAgent.permissions.readFiles": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "markdownDescription": "Allow the agent to read files in your project (analysis, dataset inspection, finding settings). Turn off to stop all project reads."
+        },
+        "llmTrainingAgent.permissions.writeFiles": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Allow the agent to modify files in your project (settings edits, data cleaning, merging cleaned data, reverting). Without this the agent asks in chat before each write."
+        },
+        "llmTrainingAgent.permissions.safeCommands": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "Allow read-only terminal commands such as `ls`, `git status`, `git diff`, `pip list` and `nvidia-smi` without asking each time."
+        },
+        "llmTrainingAgent.permissions.unrestrictedCommands": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "markdownDescription": "**Risky.** Allow any terminal command except a short list of destructive ones that are always blocked. Leave off unless you trust the agent with your machine."
+        },
+        "llmTrainingAgent.hardware.mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "local",
+            "cloud"
+          ],
+          "default": "auto",
+          "scope": "application",
+          "markdownDescription": "Where you train. `local` = this machine's GPU (no rental cost is shown), `cloud` = a rented GPU (cost is estimated only when you give an hourly rate), `auto` = detect."
+        },
+        "llmTrainingAgent.hardware.gpuName": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "GPU you train on, for example the model name printed by nvidia-smi. Leave empty to detect it automatically."
+        },
+        "llmTrainingAgent.hardware.hourlyRateUsd": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "scope": "application",
+          "description": "Hourly price in USD of your rented cloud GPU. Used only in cloud mode; never guessed."
+        },
+        "llmTrainingAgent.hardware.provider": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Cloud provider name (optional, shown in the cost assumptions)."
+        },
+        "llmTrainingAgent.hardware.gpuCount": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "scope": "application",
+          "description": "Number of GPUs."
         }
       }
     }
@@ -203,7 +276,8 @@
     "postpackage": "node scripts/promote-vsix.js",
     "verify:vsix": "python scripts/verify_vsix.py ../llm-training-agent-1.0.0.vsix",
     "verify:wiring": "npm run compile && node scripts/verify-webview-wiring.js",
-    "lint": "tsc --noEmit -p ./"
+    "lint": "tsc --noEmit -p ./",
+    "verify:ui": "npm run compile && node scripts/verify-chat-ui.js && node scripts/verify-settings-ui.js"
   },
   "dependencies": {
     "axios": "^1.6.0"

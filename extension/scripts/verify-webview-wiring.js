@@ -33,11 +33,33 @@ if (/addEventListener\(\s*['"]DOMContentLoaded['"]/.test(settings)) {
   console.log('ok settingsWebviewProvider.js: no DOMContentLoaded deferral');
 }
 
-// Chat wiring: direct bindings for send.
+// Chat wiring: the page is an external script/stylesheet in media/, referenced from the provider.
 check('chatWebviewProvider.js', [
-  "getElementById('send')",
-  "getElementById('input')",
+  "chat.js",
+  "chat.css",
+  "id=\"send\"",
+  "id=\"input\"",
+  "id=\"new-chat\"",
+  "id=\"back\"",
 ]);
+for (const file of ['chat.js', 'chat.css']) {
+  const full = path.join(root, 'media', file);
+  if (!fs.existsSync(full)) {
+    console.error(`MISSING media/${file}`);
+    process.exitCode = 1;
+  } else {
+    console.log(`ok media/${file} present`);
+  }
+}
+const chatJs = fs.readFileSync(path.join(root, 'media', 'chat.js'), 'utf8');
+for (const needle of ["$('send')", "$('input')", "'Copy Message'", "'Removed'", "'Added'"]) {
+  if (!chatJs.includes(needle)) {
+    console.error(`MISSING in media/chat.js: ${needle}`);
+    process.exitCode = 1;
+  } else {
+    console.log(`ok media/chat.js: ${needle}`);
+  }
+}
 
 // Activation retry behavior.
 const ext = fs.readFileSync(path.join(root, 'out', 'extension.js'), 'utf8');

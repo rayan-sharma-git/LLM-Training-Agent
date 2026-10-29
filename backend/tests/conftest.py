@@ -32,6 +32,18 @@ def pytest_configure(config):
     os.environ.pop(ALLOWED_ROOTS_FILE_ENV, None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_database(tmp_path_factory):
+    """Every test gets its own SQLite file; nothing touches the developer's real database."""
+    from storage.database import configure_database, reset_database
+
+    reset_database()
+    db_path = tmp_path_factory.mktemp("db") / "test.db"
+    configure_database(f"sqlite+aiosqlite:///{db_path}")
+    yield
+    reset_database()
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     loop = asyncio.new_event_loop()

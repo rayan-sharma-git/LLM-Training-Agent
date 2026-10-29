@@ -37,6 +37,48 @@ export interface AnalysisResult {
   partialFailures?: Array<Record<string, any>>;
 }
 
+/** Where the user trains. Cost is only ever estimated for `cloud` with a rate the user supplied. */
+export interface HardwareSettings {
+  mode: 'auto' | 'local' | 'cloud';
+  gpuName?: string;
+  hourlyRateUsd?: number | null;
+  provider?: string;
+  gpuCount?: number;
+}
+
+export interface PermissionPolicy {
+  readFiles: boolean;
+  writeFiles: boolean;
+  safeCommands: boolean;
+  unrestrictedCommands: boolean;
+}
+
+/** A persisted chat message; `blocks` carries change viewers, action cards and command output. */
+export interface AgentMessage {
+  messageId: string;
+  role: 'user' | 'assistant';
+  content: string;
+  blocks?: Array<Record<string, any>>;
+  createdAt?: string;
+}
+
+export interface ChatSessionSummary {
+  sessionId: string;
+  title: string;
+  createdAt?: string;
+  updatedAt?: string;
+  messageCount?: number;
+}
+
+export interface AgentChatResult {
+  sessionId: string;
+  title: string;
+  userMessage: AgentMessage;
+  message: AgentMessage;
+  error?: string | null;
+  meta?: Record<string, any>;
+}
+
 export interface ChatResponse {
   assistantResponse: string;
   references: string[];
@@ -70,6 +112,17 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+/** The permission the backend asked for when it answered 403 PERMISSION_REQUIRED, otherwise `undefined`. */
+export function permissionRequiredAction(error: unknown): string | undefined {
+  if (!(error instanceof ApiError) || error.statusCode !== 403) {
+    return undefined;
+  }
+  const detail = (error.details as { detail?: { errorCode?: string; action?: string } } | undefined)?.detail;
+  return detail && detail.errorCode === 'PERMISSION_REQUIRED' && typeof detail.action === 'string'
+    ? detail.action
+    : undefined;
 }
 
 const SECRET_KEY_PREFIX = 'llmTrainingAgent.apiKey.';
@@ -116,7 +169,12 @@ export class ApiClient {
           const apiError = data as { detail?: any; message?: string; errorCode?: string } | undefined;
           let message: string;
           if (apiError?.detail) {
-            message = typeof apiError.detail === 'object' ? JSON.stringify(apiError.detail) : String(apiError.detail);
+            const detail = apiError.detail;
+            if (detail && typeof detail === 'object' && typeof detail.message === 'string') {
+              message = detail.message;
+            } else {
+              message = typeof detail === 'object' ? JSON.stringify(detail) : String(detail);
+            }
           } else if (apiError?.message) {
             message = String(apiError.message);
           } else {
@@ -195,13 +253,15 @@ export class ApiClient {
     return response.data;
   }
 
-  async analyzeProject(projectPath: string): Promise<AnalysisResult> {
+  async analyzeProject(projectPath: string, hardware?: HardwareSettings): Promise<AnalysisResult> {
     if (!projectPath || !projectPath.trim()) {
       throw new ApiError('No project/workspace is currently open. Please open a folder first.', 0);
     }
-    const response = await this.client.post('/api/v1/project/analyze', {
-      projectPath,
-    });
+    const body: Record<string, unknown> = { projectPath };
+    if (hardware) {
+      body.hardware = hardware;
+    }
+    const response = await this.client.post('/api/v1/project/analyze', body);
     return response.data as AnalysisResult;
   }
 
@@ -426,6 +486,114 @@ export class ApiClient {
     const response = await this.client.post(`/api/v1/files/changes/${changeId}/rollback`, {
       projectRoot,
     });
+    return response.data;
+  }
+
+  // ------------------------------------------------------------------
+  // Chat agent: persistent sessions, cards, inline change viewer
+  // ------------------------------------------------------------------
+
+  /** Cleaning a large dataset can take minutes, so agent calls use a long timeout. */
+  private static readonly AGENT_TIMEOUT_MS = 30 * 60 * 1000;
+
+  async listChatSessions(projectPath?: string): Promise<{ sessions: ChatSessionSummary[] }> {
+    const response = await this.client.get('/api/v1/chat/sessions', { params: { projectPath } });
+    return response.data;
+  }
+
+  async getChatSession(
+    sessionId: string,
+    projectPath?: string
+  ): Promise<{ sessionId: string; title: string; messages: AgentMessage[] }> {
+    const response = await this.client.get(`/api/v1/chat/sessions/${encodeURIComponent(sessionId)}`, {
+      params: { projectPath },
+    });
+    return response.data;
+  }
+
+  async deleteChatSession(sessionId: string, projectPath?: string): Promise<void> {
+    await this.client.delete(`/api/v1/chat/sessions/${encodeURIComponent(sessionId)}`, {
+      params: { projectPath },
+    });
+  }
+
+  /** Send a message; without `sessionId` the backend creates the chat automatically. */
+  async agentChat(
+    message: string,
+    options: { projectPath?: string; sessionId?: string; provider?: string } = {}
+  ): Promise<AgentChatResult> {
+    const response = await this.client.post(
+      '/api/v1/agent/chat',
+      { message, ...options },
+      { timeout: ApiClient.AGENT_TIMEOUT_MS }
+    );
+    return response.data as AgentChatResult;
+  }
+
+  /** Answer a card (Allow / Deny, cleaning options, Revert, ...). */
+  async agentRespond(
+    actionId: string,
+    choice: string,
+    options: { projectPath?: string; sessionId: string }
+  ): Promise<{
+    sessionId: string;
+    resolvedMessageId?: string;
+    resolvedBlocks?: Array<Record<string, any>>;
+    message?: AgentMessage;
+  }> {
+    const response = await this.client.post(
+      `/api/v1/agent/actions/${encodeURIComponent(actionId)}/respond`,
+      { choice, ...options },
+      { timeout: ApiClient.AGENT_TIMEOUT_MS }
+    );
+    return response.data;
+  }
+
+  /** Post the latest file changes into a chat as an inline red/green viewer. */
+  async showChanges(
+    options: { projectPath?: string; sessionId?: string }
+  ): Promise<{ sessionId: string; title?: string; message: AgentMessage }> {
+    const response = await this.client.post('/api/v1/agent/changes/show', options);
+    return response.data;
+  }
+
+  /** Store a message the extension produced itself (for example a project analysis). */
+  async addChatNote(note: {
+    projectPath?: string;
+    sessionId?: string;
+    role?: 'assistant' | 'user';
+    content: string;
+    title?: string;
+    blocks?: Array<Record<string, any>>;
+  }): Promise<{ sessionId: string; title: string; message: AgentMessage }> {
+    const response = await this.client.post('/api/v1/agent/chat/note', note);
+    return response.data;
+  }
+
+  async getPermissions(projectPath?: string): Promise<PermissionPolicy> {
+    const response = await this.client.get('/api/v1/agent/permissions', { params: { projectPath } });
+    return response.data;
+  }
+
+  async setPermissions(projectPath: string, permissions: PermissionPolicy): Promise<PermissionPolicy> {
+    const response = await this.client.put('/api/v1/agent/permissions', { projectPath, permissions });
+    return response.data;
+  }
+
+  /** After the user pressed Allow on a card: permit exactly the next read or write. */
+  async allowOnce(projectPath: string, action: 'read' | 'write'): Promise<void> {
+    await this.client.post('/api/v1/agent/permissions/allow-once', { projectPath, action });
+  }
+
+  async viewFileChange(changeId: string, projectRoot?: string): Promise<any> {
+    const response = await this.client.get(`/api/v1/files/changes/${changeId}/view`, {
+      params: { projectRoot },
+    });
+    return response.data;
+  }
+
+  async revertFileChange(changeId: string, projectRoot?: string): Promise<any> {
+    const response = await this.client.post(`/api/v1/files/changes/${changeId}/revert`, { projectRoot });
     return response.data;
   }
 }

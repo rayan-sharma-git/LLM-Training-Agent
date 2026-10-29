@@ -2,27 +2,38 @@ import * as vscode from 'vscode';
 import { ApiClient } from '../services/apiClient';
 import { formatError } from '../utils';
 
+/** VS Code commands a chat button may run. Anything else coming from the webview or a stored message is ignored. */
+export const CHAT_COMMAND_WHITELIST: ReadonlySet<string> = new Set([
+  'llmTrainingAgent.analyzeProject',
+  'llmTrainingAgent.analyzeDataset',
+  'llmTrainingAgent.configureProvider',
+  'llmTrainingAgent.viewChanges',
+]);
+
+const MAX_COPY_CHARS = 2_000_000;
+
+type Screen = 'list' | 'chat';
+
 /**
- * A WebviewViewProvider that renders a functional chat interface
- * in the sidebar. Messages are sent to the backend API and the
- * assistant's response is displayed in a scrollable conversation view.
+ * The sidebar chat.
  *
- * Supports action cards — interactive messages that present the user
- * with buttons (e.g. [Install Dependencies] [Cancel]).
+ * Two screens: a scrollable list of previous chats (title, date and time) and a
+ * conversation. Conversations are stored by the backend, so they survive closing VS Code
+ * and switching chats; a chat is created automatically when the first message is sent.
+ * The page itself lives in `media/chat.js` and `media/chat.css`.
  */
 export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'llmTrainingAgent.chat';
 
   private _view?: vscode.WebviewView;
   private _disposables: vscode.Disposable[] = [];
-  /** Resolve a pending action-button promise, keyed by action id. */
+  /** Resolve a pending local action-card promise, keyed by action id. */
   private _actionResolvers: Map<string, (action: string) => void> = new Map();
-  /**
-   * Stable conversation id for this webview. History is additionally scoped
-   * by project path on the backend, so switching workspaces never leaks
-   * conversations between projects.
-   */
-  private readonly _sessionId = 'default';
+  /** The open conversation; undefined while a new, not yet created chat is on screen. */
+  private _sessionId: string | undefined;
+  private _screen: Screen = 'list';
+  private _ready = false;
+  private _queued: Array<() => void> = [];
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
@@ -30,15 +41,14 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     private readonly _ensureBackend?: () => Promise<boolean>
   ) {}
 
-  /**
-   * Absolute path of the project the chat should talk about.
-   *
-   * Resolved on every call from the live workspace, so switching from Project A
-   * to Project B immediately scopes the conversation to Project B. When no
-   * folder is open the chat still works, just without project context.
-   */
+  /** Project the chat belongs to, resolved from the live workspace on every call. */
   private _getProjectPath(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  }
+
+  /** The conversation that new messages from commands (for example an analysis) are added to. */
+  public getActiveSessionId(): string | undefined {
+    return this._sessionId;
   }
 
   resolveWebviewView(
@@ -47,79 +57,256 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this._view = webviewView;
+    this._ready = false;
+    this._screen = 'list';
 
     webviewView.webview.options = {
-      // Allow scripts so the chat UI can send messages.
       enableScripts: true,
-      localResourceRoots: [this._extensionUri],
+      localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')],
     };
-
     webviewView.webview.html = this._getHtml(webviewView.webview);
 
-    // Handle messages coming from the webview. Failures are logged (without
-    // message contents, which may contain keys) so a dead handler cannot
-    // hide as "clicking Send does nothing" with an empty console.
     webviewView.webview.onDidReceiveMessage(
       async (message) => {
         try {
-        if (!message || typeof message !== 'object' || typeof message.command !== 'string') {
-          return;
-        }
-        switch (message.command) {
-          case 'sendMessage': {
-            const text = message.text;
-            if (!text || !text.trim()) {
-              return;
-            }
-            await this._handleSendMessage(text);
-            break;
-          }
-          case 'ready': {
-            // The webview finished loading — replay persisted history.
-            await this._restoreHistory();
-            break;
-          }
-          case 'actionButtonClicked': {
-            const actionId = message.actionId as string;
-            const action = message.action as string;
-            const resolver = this._actionResolvers.get(actionId);
-            if (resolver) {
-              resolver(action);
-              this._actionResolvers.delete(actionId);
-            }
-            break;
-          }
-        }
+          await this._onMessage(message);
         } catch (error) {
+          // Never log message contents (they may hold keys); the command name is enough to diagnose.
           console.error(
             `Chat webview handler failed for "${message?.command ?? 'unknown'}":`,
             error instanceof Error ? error.message : String(error)
           );
+          this._post({ command: 'busy', value: false });
+          this._post({
+            command: 'appendMessage',
+            message: { role: 'assistant', content: `⚠️ ${formatError(error)}`, isError: true },
+          });
         }
       },
       null,
       this._disposables
     );
+    webviewView.onDidDispose(() => {
+      this._view = undefined;
+      this._ready = false;
+    });
   }
 
-  /**
-   * Post an assistant message to the chat view (used by other commands).
-   */
-  public postAssistantMessage(text: string): void {
-    if (!this._view) {
+  // ------------------------------------------------------------------
+  // Webview → extension
+  // ------------------------------------------------------------------
+  private async _onMessage(message: any): Promise<void> {
+    if (!message || typeof message !== 'object' || typeof message.command !== 'string') {
       return;
     }
-    this._view.webview.postMessage({
-      command: 'appendMessage',
-      role: 'assistant',
-      text,
-    });
+    switch (message.command) {
+      case 'ready':
+        this._ready = true;
+        await this._showList();
+        this._queued.splice(0).forEach((fn) => fn());
+        break;
+      case 'listSessions':
+      case 'backToList':
+        await this._showList();
+        break;
+      case 'newChat':
+        this._showNewChat();
+        break;
+      case 'openSession':
+        if (typeof message.sessionId === 'string') {
+          await this._openSession(message.sessionId);
+        }
+        break;
+      case 'deleteSession':
+        if (typeof message.sessionId === 'string') {
+          await this._deleteSession(message.sessionId);
+        }
+        break;
+      case 'sendMessage':
+        if (typeof message.text === 'string' && message.text.trim()) {
+          await this._handleSendMessage(message.text);
+        }
+        break;
+      case 'respondAction':
+        if (typeof message.actionId === 'string' && typeof message.choice === 'string') {
+          await this._handleRespond(message.actionId, message.choice);
+        }
+        break;
+      case 'copyText':
+        if (typeof message.text === 'string') {
+          await vscode.env.clipboard.writeText(message.text.slice(0, MAX_COPY_CHARS));
+        }
+        break;
+      case 'runCommand':
+        if (typeof message.id === 'string' && CHAT_COMMAND_WHITELIST.has(message.id)) {
+          await vscode.commands.executeCommand(message.id);
+        }
+        break;
+      case 'actionButtonClicked': {
+        const resolver = this._actionResolvers.get(message.actionId as string);
+        if (resolver) {
+          resolver(String(message.action));
+          this._actionResolvers.delete(message.actionId as string);
+        }
+        break;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Screens
+  // ------------------------------------------------------------------
+  private async _ready_backend(): Promise<boolean> {
+    if (!this._ensureBackend) {
+      return true;
+    }
+    return this._ensureBackend();
+  }
+
+  private async _showList(): Promise<void> {
+    this._screen = 'list';
+    this._sessionId = undefined;
+    const projectPath = this._getProjectPath();
+    let sessions: unknown[] = [];
+    try {
+      if (await this._ready_backend()) {
+        sessions = (await this._apiClient.listChatSessions(projectPath)).sessions ?? [];
+      }
+    } catch {
+      // The list is best-effort; chat itself still works and reports its own errors.
+    }
+    this._post({ command: 'showList', sessions, hasProject: !!projectPath });
+  }
+
+  private _showNewChat(): void {
+    this._screen = 'chat';
+    this._sessionId = undefined;
+    this._post({ command: 'showChat', sessionId: null, title: 'New chat', messages: [] });
+  }
+
+  private async _openSession(sessionId: string): Promise<void> {
+    await this._ready_backend();
+    try {
+      const data = await this._apiClient.getChatSession(sessionId, this._getProjectPath());
+      this._screen = 'chat';
+      this._sessionId = sessionId;
+      this._post({ command: 'showChat', sessionId, title: data.title, messages: data.messages });
+    } catch (error) {
+      await this._showList();
+      this._post({ command: 'appendMessage', message: { role: 'assistant', content: `⚠️ ${formatError(error)}`, isError: true } });
+    }
+  }
+
+  private async _deleteSession(sessionId: string): Promise<void> {
+    await this._ready_backend();
+    try {
+      await this._apiClient.deleteChatSession(sessionId, this._getProjectPath());
+    } catch (error) {
+      vscode.window.showErrorMessage(`Could not delete the chat: ${formatError(error)}`);
+    }
+    await this._showList();
+  }
+
+  // ------------------------------------------------------------------
+  // Messages
+  // ------------------------------------------------------------------
+  private async _handleSendMessage(text: string): Promise<void> {
+    // The webview already shows the user's message locally.
+    try {
+      if (!(await this._ready_backend())) {
+        throw new Error('The Python backend could not be started. Check the "LLM Training Agent: Backend" output channel.');
+      }
+      const result = await this._apiClient.agentChat(text, {
+        projectPath: this._getProjectPath(),
+        sessionId: this._sessionId,
+      });
+      this._sessionId = result.sessionId;
+      this._post({ command: 'setTitle', title: result.title });
+      this._post({ command: 'appendMessage', sessionId: result.sessionId, message: result.message });
+    } catch (error) {
+      this._post({
+        command: 'appendMessage',
+        message: { role: 'assistant', content: `⚠️ Failed to get a response from the backend: ${formatError(error)}`, isError: true },
+      });
+    } finally {
+      this._post({ command: 'busy', value: false });
+    }
+  }
+
+  private async _handleRespond(actionId: string, choice: string): Promise<void> {
+    try {
+      const sessionId = this._sessionId;
+      if (!sessionId) {
+        throw new Error('This card belongs to a chat that is no longer open.');
+      }
+      const result = await this._apiClient.agentRespond(actionId, choice, {
+        projectPath: this._getProjectPath(),
+        sessionId,
+      });
+      if (result.resolvedMessageId && result.resolvedBlocks) {
+        this._post({ command: 'replaceBlocks', messageId: result.resolvedMessageId, blocks: result.resolvedBlocks });
+      }
+      if (result.message) {
+        this._post({ command: 'appendMessage', sessionId, message: result.message });
+      }
+    } catch (error) {
+      this._post({
+        command: 'appendMessage',
+        message: { role: 'assistant', content: `⚠️ ${formatError(error)}`, isError: true },
+      });
+      // Re-open the conversation so a card that was already answered shows its real state.
+      if (this._sessionId) {
+        await this._openSession(this._sessionId);
+      }
+    } finally {
+      this._post({ command: 'busy', value: false });
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // API used by commands
+  // ------------------------------------------------------------------
+
+  /**
+   * Add an assistant message to the open chat (creating and storing one if none is open), so it
+   * is part of the persisted history rather than lost when the view closes.
+   */
+  public async postAssistantMessage(text: string, options: { title?: string } = {}): Promise<void> {
+    let stored = false;
+    try {
+      if (await this._ready_backend()) {
+        const previous = this._sessionId;
+        const note = await this._apiClient.addChatNote({
+          projectPath: this._getProjectPath(),
+          sessionId: previous,
+          role: 'assistant',
+          content: text,
+          title: options.title,
+        });
+        stored = true;
+        this._sessionId = note.sessionId;
+        if (this._view) {
+          if (previous === note.sessionId && this._screen === 'chat') {
+            this._post({ command: 'appendMessage', sessionId: note.sessionId, message: note.message });
+            this._post({ command: 'setTitle', title: note.title });
+          } else {
+            await this._openSession(note.sessionId);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Could not store a chat message:', error instanceof Error ? error.message : String(error));
+    }
+    if (!stored && this._view) {
+      // Backend unavailable: still show the text in the open view (it will not be in the history).
+      this._screenForMessage();
+      this._post({ command: 'appendMessage', message: { role: 'assistant', content: text } });
+    }
   }
 
   /**
    * Post an action card — a message with clickable buttons — to the chat view.
-   * Returns a promise that resolves to the action label the user clicked.
-   * If the view is not available, the promise resolves to an empty string.
+   * Resolves to the `action` of the clicked button, or '' when the view is unavailable.
    */
   public postActionCard(options: {
     text: string;
@@ -131,12 +318,10 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
         resolve('');
         return;
       }
-
-      // Store the resolver so the webview message handler can call it.
       this._actionResolvers.set(options.actionId, resolve);
-
-      this._view.webview.postMessage({
-        command: 'showActionCard',
+      this._screenForMessage();
+      this._post({
+        command: 'localCard',
         actionId: options.actionId,
         text: options.text,
         buttons: options.buttons,
@@ -144,84 +329,74 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async _handleSendMessage(text: string): Promise<void> {
-    if (!this._view) {
-      return;
-    }
-
-    // NOTE: the webview script already appended the user's message locally —
-    // posting it back here would duplicate it in the conversation view.
-
-    // Start the backend on first use rather than at activation.
-    if (this._ensureBackend) {
-      await this._ensureBackend();
-    }
-
-    try {
-      const response = await this._apiClient.sendChatMessage(text, {
-        projectPath: this._getProjectPath(),
-        sessionId: this._sessionId,
-      });
-      this._view.webview.postMessage({
-        command: 'appendMessage',
-        role: 'assistant',
-        text: response.assistantResponse,
-        confidence: response.confidence,
-        references: response.references,
-      });
-    } catch (error) {
-      this._view.webview.postMessage({
-        command: 'appendMessage',
-        role: 'assistant',
-        text: `⚠️ Failed to get a response from the backend: ${formatError(error)}`,
-      });
-    }
-  }
-
-  /**
-   * Replay the backend's persisted conversation into the webview so history
-   * survives webview reloads and extension restarts (within one backend run).
-   */
-  private async _restoreHistory(): Promise<void> {
-    if (!this._view) {
-      return;
-    }
-    if (this._ensureBackend) {
-      await this._ensureBackend();
-    }
-    try {
-      const { messages } = await this._apiClient.getChatHistory({
-        projectPath: this._getProjectPath(),
-        sessionId: this._sessionId,
-      });
-      if (!messages || messages.length === 0) {
-        return;
+  /** Show the latest file changes inline in the chat (the View Changes command). */
+  public async showChanges(): Promise<void> {
+    await vscode.commands.executeCommand(`${ChatWebviewProvider.viewType}.focus`);
+    const run = async () => {
+      this._post({ command: 'busy', value: true });
+      try {
+        if (!(await this._ready_backend())) {
+          throw new Error('The Python backend could not be started. Check the "LLM Training Agent: Backend" output channel.');
+        }
+        const result = await this._apiClient.showChanges({
+          projectPath: this._getProjectPath(),
+          sessionId: this._sessionId,
+        });
+        const previous = this._sessionId;
+        this._sessionId = result.sessionId;
+        if (previous === result.sessionId && this._screen === 'chat') {
+          this._post({ command: 'appendMessage', sessionId: result.sessionId, message: result.message });
+        } else {
+          await this._openSession(result.sessionId);
+        }
+      } catch (error) {
+        this._screenForMessage();
+        this._post({
+          command: 'appendMessage',
+          message: { role: 'assistant', content: `⚠️ Could not show the changes: ${formatError(error)}`, isError: true },
+        });
+      } finally {
+        this._post({ command: 'busy', value: false });
       }
-      this._view.webview.postMessage({
-        command: 'restoreHistory',
-        messages: messages.map((m) => ({ role: m.role, text: m.content })),
-      });
-    } catch {
-      // History restore is best-effort; chat still works without it.
+    };
+    if (this._ready) {
+      await run();
+    } else {
+      this._queued.push(() => void run());
     }
   }
 
+  /** Make sure a conversation (not the chat list) is on screen before a local message is posted. */
+  private _screenForMessage(): void {
+    if (this._screen !== 'chat') {
+      this._showNewChat();
+    }
+  }
+
+  private _post(message: Record<string, unknown>): void {
+    if (!this._view) {
+      return;
+    }
+    void this._view.webview.postMessage(message);
+  }
+
+  // ------------------------------------------------------------------
+  // HTML
+  // ------------------------------------------------------------------
   private _getHtml(webview: vscode.Webview): string {
-    // VS Code serves every webview through an internal service worker. A CSP
-    // of `default-src 'none'` with no explicit `worker-src` makes that
-    // registration fail on some platforms with:
-    //   "Could not register service worker: InvalidStateError:
-    //    The document is in an invalid state."
-    // The whole view then stays blank (empty console, "resource was not
-    // cached") and every button silently does nothing. Allowing workers from
-    // the webview's own source keeps the bootstrap alive while everything
-    // else stays locked down. `connect-src 'none'` is intentional: the UI
-    // never fetches directly; it talks to the extension via postMessage.
+    // VS Code serves every webview through an internal service worker. A CSP of
+    // `default-src 'none'` with no explicit `worker-src` makes that registration fail on some
+    // platforms ("The document is in an invalid state"), leaving a blank view whose buttons do
+    // nothing. Allowing workers from the webview's own source keeps the bootstrap alive while
+    // everything else stays locked down. The script and stylesheet are external files served
+    // from the extension, so no inline script is needed.
+    const mediaUri = (file: string) =>
+      webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', file));
     const csp =
       `default-src 'none'; ` +
-      `script-src ${webview.cspSource} 'unsafe-inline'; ` +
-      `style-src ${webview.cspSource} 'unsafe-inline'; ` +
-      `img-src ${webview.cspSource} data: https:; ` +
+      `script-src ${webview.cspSource}; ` +
+      `style-src ${webview.cspSource}; ` +
+      `img-src ${webview.cspSource} data:; ` +
       `font-src ${webview.cspSource} data:; ` +
       `connect-src 'none'; ` +
       `worker-src ${webview.cspSource} blob:;`;
@@ -232,415 +407,31 @@ export class ChatWebviewProvider implements vscode.WebviewViewProvider {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Chat</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: var(--vscode-font-family);
-      font-size: var(--vscode-font-size);
-      color: var(--vscode-foreground);
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-    }
-    #messages {
-      flex: 1;
-      overflow-y: auto;
-      padding: 8px;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-    .message {
-      padding: 8px 10px;
-      border-radius: 6px;
-      max-width: 90%;
-      word-wrap: break-word;
-      white-space: pre-wrap;
-      line-height: 1.4;
-    }
-    .message.user {
-      align-self: flex-end;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-    }
-    .message.assistant {
-      align-self: flex-start;
-      background: var(--vscode-editor-inlineValues-background, var(--vscode-editor-background));
-      color: var(--vscode-foreground);
-      border: 1px solid var(--vscode-panel-border);
-    }
-    .message .meta {
-      font-size: 0.8em;
-      opacity: 0.7;
-      margin-bottom: 4px;
-    }
-    .message .refs {
-      margin-top: 6px;
-      font-size: 0.85em;
-      opacity: 0.8;
-    }
-    .action-card {
-      align-self: flex-start;
-      background: var(--vscode-editor-inlineValues-background, var(--vscode-editor-background));
-      color: var(--vscode-foreground);
-      border: 1px solid var(--vscode-panel-border);
-      border-radius: 6px;
-      padding: 10px;
-      max-width: 95%;
-      word-wrap: break-word;
-      white-space: pre-wrap;
-      line-height: 1.4;
-    }
-    .action-card .card-text {
-      margin-bottom: 10px;
-    }
-    .action-card .card-buttons {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .action-card .card-buttons button {
-      padding: 6px 14px;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      font-family: inherit;
-      font-size: var(--vscode-font-size);
-    }
-    .action-card .card-buttons .primary-btn {
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-    }
-    .action-card .card-buttons .primary-btn:hover {
-      background: var(--vscode-button-hoverBackground);
-    }
-    .action-card .card-buttons .secondary-btn {
-      background: var(--vscode-button-secondaryBackground, var(--vscode-editor-background));
-      color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
-      border: 1px solid var(--vscode-panel-border);
-    }
-    .action-card .card-buttons .secondary-btn:hover {
-      background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
-    }
-    #input-row {
-      display: flex;
-      gap: 6px;
-      padding: 8px;
-      border-top: 1px solid var(--vscode-panel-border);
-    }
-    #input {
-      flex: 1;
-      padding: 6px 8px;
-      border: 1px solid var(--vscode-input-border, transparent);
-      background: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
-      border-radius: 4px;
-      resize: none;
-      font-family: inherit;
-    }
-    #send {
-      padding: 6px 12px;
-      border: none;
-      border-radius: 4px;
-      background: var(--vscode-button-background);
-      color: var(--vscode-button-foreground);
-      cursor: pointer;
-    }
-    #send:hover { background: var(--vscode-button-hoverBackground); }
-    #send:disabled { opacity: 0.5; cursor: default; }
-    .placeholder {
-      color: var(--vscode-descriptionForeground);
-      text-align: center;
-      margin-top: 40px;
-      font-style: italic;
-    }
-    /* Rendered Markdown in assistant messages */
-    .body h2 {
-      font-size: 1.15em;
-      margin: 14px 0 6px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid var(--vscode-panel-border);
-    }
-    .body h3 {
-      font-size: 1.02em;
-      margin: 12px 0 4px;
-    }
-    .body h4 {
-      font-size: 0.95em;
-      margin: 10px 0 4px;
-      opacity: 0.9;
-    }
-    .body p { margin: 4px 0; }
-    .body ul { margin: 4px 0; padding-left: 20px; }
-    .body li { margin: 2px 0; }
-    .body code {
-      background: var(--vscode-textCodeBlock-background, rgba(127,127,127,0.15));
-      padding: 1px 4px;
-      border-radius: 3px;
-      font-family: var(--vscode-editor-font-family, monospace);
-      font-size: 0.9em;
-    }
-    .body blockquote {
-      margin: 6px 0;
-      padding: 6px 10px;
-      border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border));
-      background: var(--vscode-textBlockQuote-background, transparent);
-      opacity: 0.9;
-    }
-    .body hr {
-      border: none;
-      border-top: 1px solid var(--vscode-panel-border);
-      margin: 12px 0;
-    }
-    .body em { opacity: 0.75; }
-  </style>
+  <link rel="stylesheet" href="${mediaUri('chat.css')}">
 </head>
 <body>
-  <div id="messages">
-    <div class="placeholder">Ask about your fine-tuning project…</div>
+  <div id="app">
+    <section id="list-screen">
+      <div class="topbar">
+        <span class="title">Chats</span>
+        <button id="new-chat" class="btn" type="button">New chat</button>
+      </div>
+      <ul id="sessions"></ul>
+    </section>
+    <section id="chat-screen" hidden>
+      <div class="topbar">
+        <button id="back" class="btn icon" type="button" title="Back to chats" aria-label="Back to chats">&#8592;</button>
+        <span class="title" id="chat-title">New chat</span>
+        <button id="new-chat-2" class="btn secondary" type="button" title="New chat" aria-label="New chat">+</button>
+      </div>
+      <div id="messages"></div>
+      <div id="composer">
+        <textarea id="input" rows="2" placeholder="Type a message…"></textarea>
+        <button id="send" class="btn" type="button">Send</button>
+      </div>
+    </section>
   </div>
-  <div id="input-row">
-    <textarea id="input" rows="2" placeholder="Type a message…"></textarea>
-    <button id="send">Send</button>
-  </div>
-  <script>
-    const vscode = acquireVsCodeApi();
-    const messagesEl = document.getElementById('messages');
-    const input = document.getElementById('input');
-    const sendBtn = document.getElementById('send');
-
-    function appendMessage(role, text, meta) {
-      const placeholder = document.querySelector('.placeholder');
-      if (placeholder) placeholder.remove();
-      const div = document.createElement('div');
-      div.className = 'message ' + role;
-      if (meta) {
-        const parts = [];
-        if (meta.confidence) parts.push('Confidence: ' + meta.confidence);
-        if (meta.refs && meta.refs.length) parts.push('References: ' + meta.refs.join(', '));
-        if (parts.length) {
-          const m = document.createElement('div');
-          m.className = 'meta';
-          m.textContent = parts.join(' · ');
-          div.appendChild(m);
-        }
-      }
-      const body = document.createElement('div');
-      body.className = 'body';
-      if (role === 'assistant') {
-        renderMarkdown(body, text);
-      } else {
-        body.textContent = text;
-      }
-      div.appendChild(body);
-      messagesEl.appendChild(div);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    /**
-     * Minimal, safe Markdown renderer.
-     *
-     * The complete analysis is a long, heavily structured document, so plain
-     * textContent would be unreadable. This handles the subset the backend
-     * emits (headings, bold, inline code, blockquotes, lists) and — critically
-     * — builds text nodes rather than injecting HTML, so project-supplied
-     * content can never execute as markup (prompt-injection safe).
-     */
-    function renderMarkdown(root, text) {
-      const lines = String(text).split('\n');
-      let listEl = null;
-
-      function inline(parent, content) {
-        // Split on bold and code spans. The pattern is assembled with
-        // String.fromCharCode so no backtick appears in this source: this JS
-        // lives inside a TypeScript template literal, where a literal
-        // backtick would terminate the surrounding string.
-        var TICK = String.fromCharCode(96);
-        var pattern = new RegExp(
-          '(\\*\\*[^*]+\\*\\*|' + TICK + '[^' + TICK + ']+' + TICK + ')', 'g'
-        );
-        var lastIndex = 0;
-        var match;
-        while ((match = pattern.exec(content)) !== null) {
-          if (match.index > lastIndex) {
-            parent.appendChild(document.createTextNode(content.slice(lastIndex, match.index)));
-          }
-          var token = match[0];
-          if (token.indexOf('**') === 0) {
-            var strong = document.createElement('strong');
-            strong.textContent = token.slice(2, -2);
-            parent.appendChild(strong);
-          } else {
-            var code = document.createElement('code');
-            code.textContent = token.slice(1, -1);
-            parent.appendChild(code);
-          }
-          lastIndex = pattern.lastIndex;
-        }
-        if (lastIndex < content.length) {
-          parent.appendChild(document.createTextNode(content.slice(lastIndex)));
-        }
-      }
-
-      function closeList() {
-        if (listEl) { listEl = null; }
-      }
-
-      lines.forEach(function(line) {
-        const trimmed = line.trim();
-
-        if (!trimmed) { closeList(); return; }
-
-        if (trimmed.startsWith('### ')) {
-          closeList();
-          const h = document.createElement('h4');
-          inline(h, trimmed.slice(4));
-          root.appendChild(h);
-          return;
-        }
-        if (trimmed.startsWith('## ')) {
-          closeList();
-          const h = document.createElement('h3');
-          inline(h, trimmed.slice(3));
-          root.appendChild(h);
-          return;
-        }
-        if (trimmed.startsWith('# ')) {
-          closeList();
-          const h = document.createElement('h2');
-          inline(h, trimmed.slice(2));
-          root.appendChild(h);
-          return;
-        }
-        if (trimmed.startsWith('> ')) {
-          closeList();
-          const q = document.createElement('blockquote');
-          inline(q, trimmed.slice(2));
-          root.appendChild(q);
-          return;
-        }
-        if (trimmed === '---') {
-          closeList();
-          root.appendChild(document.createElement('hr'));
-          return;
-        }
-        // List items, including the "  - " nested style used by recommendations.
-        const listMatch = trimmed.match(/^([-*]|\d+\.)\s+(.*)$/);
-        if (listMatch) {
-          if (!listEl) {
-            listEl = document.createElement('ul');
-            root.appendChild(listEl);
-          }
-          const li = document.createElement('li');
-          inline(li, listMatch[2]);
-          listEl.appendChild(li);
-          return;
-        }
-
-        closeList();
-        const p = document.createElement('p');
-        inline(p, trimmed);
-        root.appendChild(p);
-      });
-    }
-
-    function showActionCard(actionId, text, buttons) {
-      const placeholder = document.querySelector('.placeholder');
-      if (placeholder) placeholder.remove();
-      const card = document.createElement('div');
-      card.className = 'action-card';
-      card.dataset.actionId = actionId;
-
-      const textDiv = document.createElement('div');
-      textDiv.className = 'card-text';
-      textDiv.textContent = text;
-      card.appendChild(textDiv);
-
-      const btnRow = document.createElement('div');
-      btnRow.className = 'card-buttons';
-      buttons.forEach(function(btn, index) {
-        const button = document.createElement('button');
-        button.textContent = btn.label;
-        button.className = index === 0 ? 'primary-btn' : 'secondary-btn';
-        button.addEventListener('click', function() {
-          // Disable all buttons to prevent double-clicks
-          const allBtns = btnRow.querySelectorAll('button');
-          allBtns.forEach(function(b) { b.disabled = true; });
-          vscode.postMessage({
-            command: 'actionButtonClicked',
-            actionId: actionId,
-            action: btn.action
-          });
-        });
-        btnRow.appendChild(button);
-      });
-      card.appendChild(btnRow);
-      messagesEl.appendChild(card);
-      messagesEl.scrollTop = messagesEl.scrollHeight;
-    }
-
-    function send() {
-      const text = input.value.trim();
-      if (!text) return;
-      appendMessage('user', text);
-      input.value = '';
-      sendBtn.disabled = true;
-      vscode.postMessage({ command: 'sendMessage', text });
-    }
-
-    sendBtn.addEventListener('click', send);
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        send();
-      }
-    });
-
-    window.addEventListener('message', (event) => {
-      const message = event.data;
-      switch (message.command) {
-        case 'appendMessage':
-          const meta = message.role === 'assistant'
-            ? {
-                confidence: message.confidence,
-                refs: message.references,
-              }
-            : undefined;
-          appendMessage(message.role, message.text, meta);
-          sendBtn.disabled = false;
-          break;
-        case 'showActionCard':
-          showActionCard(message.actionId, message.text, message.buttons);
-          sendBtn.disabled = false;
-          break;
-        case 'restoreHistory':
-          (message.messages || []).forEach(function(m) {
-            appendMessage(m.role, m.text);
-          });
-          break;
-      }
-    });
-
-    // Tell the extension we are ready to receive restored history.
-    // Wrapped so a missing acquireVsCodeApi (or any wiring fault) surfaces as
-    // visible text instead of a dead Send button with an empty console.
-    try {
-      vscode.postMessage({ command: 'ready' });
-    } catch (err) {
-      var host = document.getElementById('messages');
-      if (host) {
-        var banner = document.createElement('div');
-        banner.className = 'message assistant';
-        banner.textContent = 'Chat failed to initialize. Reload the window; the extension log has details.';
-        host.appendChild(banner);
-      }
-    }
-    // NOTE: no DOMContentLoaded wrapper here. This script runs at the end of
-    // <body>, after #input/#send exist; the webview may already be past
-    // DOMContentLoaded, in which case deferred listeners never fire and the
-    // Send button silently does nothing.
-  </script>
+  <script src="${mediaUri('chat.js')}"></script>
 </body>
 </html>`;
   }

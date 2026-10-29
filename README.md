@@ -8,7 +8,7 @@ Install the single `llm-training-agent-1.0.0.vsix` file at the repository root, 
 
 ### What this is
 
-A VS Code extension for anyone preparing or considering a fine-tuning run. It adds Overview, Chat, Reports, and Settings views plus commands such as Analyze Project, Analyze Dataset, Open Chat, View Report, Configure AI Provider, and View Changes.
+A VS Code extension for anyone preparing or considering a fine-tuning run. It adds Overview, Chat, Reports, and Settings views plus commands such as Analyze Project, Analyze Dataset, Open Chat, View Report, Configure AI Provider, and View Changes. The chat keeps a history of conversations, shows file changes inline as red/green blocks, and can edit settings, clean datasets and run terminal commands under Settings → Permissions.
 
 Open your project folder, run Analyze Project, and read the report in the Chat panel. Ask follow-ups there, revisit saved reports, switch AI providers in Settings, and review proposed file edits in a diff before anything is applied.
 

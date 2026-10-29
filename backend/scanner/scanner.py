@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .framework_detector import FrameworkDetector
+from analysis.code_inspector import inspect_project
 from cleaning import dataset_io
 from hardware.gpu_detector import detect_gpus
 
@@ -44,12 +45,36 @@ class ProjectScanner:
         datasets = self._discover_datasets()
         prompts = self._discover_prompts()
         configs = self._discover_configs()
-        training_scripts = self._discover_scripts(["train*.py", "finetune*.py", "run_*.py"])
-        eval_scripts = self._discover_scripts(["eval*.py", "evaluate*.py", "test*.py"])
-        inference_scripts = self._discover_scripts(["inference*.py", "predict*.py", "serve*.py"])
+        # The code itself is the source of truth: file names alone missed
+        # ``fine_tune.py`` and any script that is not called train*.py.
+        inspection = inspect_project(self.project_path)
+        training_scripts = sorted(set(
+            self._discover_scripts([
+                "train*.py", "*train.py", "finetune*.py", "fine_tune*.py", "fine-tune*.py",
+                "sft*.py", "lora*.py", "qlora*.py", "run_*.py",
+            ])
+            + [script.path for script in inspection.training_scripts]
+        ))
+        eval_scripts = sorted(set(
+            self._discover_scripts(["eval*.py", "evaluate*.py", "test*.py"])
+            + inspection.evaluation_scripts
+        ))
+        inference_scripts = sorted(set(
+            self._discover_scripts(["inference*.py", "predict*.py", "serve*.py"])
+            + inspection.inference_scripts
+        ))
 
-        # Detect model
+        if framework.get("framework") in (None, "unknown"):
+            libs = set(inspection.libraries)
+            if "unsloth" in libs:
+                framework = {**framework, "framework": "unsloth"}
+            elif libs & {"transformers", "peft", "trl"}:
+                framework = {**framework, "framework": "huggingface"}
+
+        # Detect model: explicit config files first, then the training code.
         base_model = self._detect_model()
+        if not base_model and inspection.base_model:
+            base_model = str(inspection.base_model.value)
 
         result = {
             "project_name": self.project_path.name,
@@ -64,6 +89,7 @@ class ProjectScanner:
             "inference_scripts": inference_scripts,
             "hardware_information": self._detect_hardware(),
             "project_statistics": self._compute_statistics(),
+            "training_insights": inspection.to_dict(),
         }
 
         logger.info("Project scan complete")

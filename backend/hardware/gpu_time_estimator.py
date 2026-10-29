@@ -511,6 +511,9 @@ def extract_training_config_from_context(context: Any) -> TrainingConfig:
     import re
     from pathlib import Path
 
+    #: Attributes a config file actually defined (so code defaults never override them).
+    _config_keys_found: set = set()
+
     for cf in config_files:
         try:
             cfg_path = Path(cf) if Path(cf).is_absolute() else Path(project_path) / cf
@@ -522,28 +525,35 @@ def extract_training_config_from_context(context: Any) -> TrainingConfig:
             m = re.search(r"per_device_train_batch_size\s*[:=]\s*(\d+)", text)
             if m:
                 config.batch_size = int(m.group(1))
+                _config_keys_found.add("batch_size")
 
             # Gradient accumulation
             m = re.search(r"gradient_accumulation_steps\s*[:=]\s*(\d+)", text)
             if m:
                 config.gradient_accumulation = int(m.group(1))
+                _config_keys_found.add("gradient_accumulation")
 
             # Epochs
             m = re.search(r"num_train_epochs\s*[:=]\s*([\d.]+)", text)
             if m:
                 config.epochs = int(float(m.group(1)))
+                _config_keys_found.add("epochs")
 
             # Max steps
             m = re.search(r"max_steps\s*[:=]\s*(\d+)", text)
             if m:
                 config.max_steps = int(m.group(1))
+                _config_keys_found.add("max_steps")
 
             # Sequence length
             m = re.search(r"max_seq_length\s*[:=]\s*(\d+)", text)
             if m:
                 config.sequence_length = int(m.group(1))
+                _config_keys_found.add("sequence_length")
 
             # Precision
+            if any(tok in text.lower() for tok in ("fp16", "float16", "bf16", "bfloat16", "4bit", "8bit")):
+                _config_keys_found.add("precision")
             if "fp16" in text.lower() or "float16" in text.lower():
                 config.precision = "fp16"
             elif "bf16" in text.lower() or "bfloat16" in text.lower():
@@ -554,6 +564,8 @@ def extract_training_config_from_context(context: Any) -> TrainingConfig:
                 config.precision = "8bit"
 
             # Training method
+            if "lora" in text.lower() or "peft" in text.lower():
+                _config_keys_found.add("training_method")
             if "qlora" in text.lower():
                 config.training_method = "qlora"
             elif "lora" in text.lower() or "peft" in text.lower():
@@ -569,6 +581,7 @@ def extract_training_config_from_context(context: Any) -> TrainingConfig:
             m = re.search(r"dataloader_num_workers\s*[:=]\s*(\d+)", text)
             if m:
                 config.dataloader_workers = int(m.group(1))
+                _config_keys_found.add("dataloader_workers")
 
             # Framework / distributed strategy
             if "deepspeed" in text.lower():
@@ -586,20 +599,81 @@ def extract_training_config_from_context(context: Any) -> TrainingConfig:
         except Exception as e:
             logger.debug(f"Failed to parse config {cf}: {e}")
 
-    # Extract param count from model name
+    # Values read from the training code itself (TrainingArguments, LoraConfig,
+    # BitsAndBytesConfig ...). They only fill what the config files left at the
+    # defaults, so an explicit config file still wins.
+    _apply_training_insights(config, getattr(context, "training_insights", None) or {},
+                             config_files_defined=_config_keys_found)
+
+    # Extract param count from the model name (regex, so "2.7b" is not read as "7b")
     if config.model_name:
-        name_lower = config.model_name.lower()
-        param_map = [
-            ("70b", 70.0), ("72b", 72.0), ("7b", 7.0), ("8b", 8.0),
-            ("2.7b", 2.7), ("2b", 2.0), ("1.1b", 1.1), ("1b", 1.0),
-            ("13b", 13.0), ("3b", 3.0), ("30b", 30.0), ("34b", 34.0),
-        ]
-        for pattern, params in param_map:
-            if pattern in name_lower:
-                config.param_count_billions = params
-                break
+        from analysis.code_inspector import parse_param_count
+
+        parsed = parse_param_count(config.model_name)
+        if parsed is not None:
+            config.param_count_billions = parsed
 
     return config
+
+
+def _apply_training_insights(config: TrainingConfig, insights: Dict[str, Any],
+                             config_files_defined: set) -> None:
+    """Fill *config* from the inspector's findings (never overriding config files)."""
+    if not insights:
+        return
+    args = insights.get("training_args") or {}
+    lora = insights.get("lora") or {}
+
+    def value(source: Dict[str, Any], key: str) -> Any:
+        entry = source.get(key)
+        return entry.get("value") if isinstance(entry, dict) else None
+
+    def as_int(raw: Any) -> Optional[int]:
+        try:
+            return int(float(raw))
+        except (TypeError, ValueError):
+            return None
+
+    mapping = (
+        ("per_device_train_batch_size", "batch_size"),
+        ("gradient_accumulation_steps", "gradient_accumulation"),
+        ("num_train_epochs", "epochs"),
+        ("max_steps", "max_steps"),
+        ("max_seq_length", "sequence_length"),
+        ("max_length", "sequence_length"),
+        ("dataloader_num_workers", "dataloader_workers"),
+    )
+    for arg_key, attr in mapping:
+        if attr in config_files_defined:
+            continue
+        number = as_int(value(args, arg_key))
+        if number is not None and number > 0:
+            setattr(config, attr, number)
+
+    if "precision" not in config_files_defined:
+        method_quant = insights.get("quantization") or {}
+        if value(method_quant, "load_in_4bit") is True:
+            config.precision = "4bit"
+        elif value(method_quant, "load_in_8bit") is True:
+            config.precision = "8bit"
+        elif value(args, "bf16") is True:
+            config.precision = "bf16"
+        elif value(args, "fp16") is True:
+            config.precision = "fp16"
+
+    if value(args, "gradient_checkpointing") is True:
+        config.gradient_checkpointing = True
+
+    method = insights.get("method")
+    if method in ("lora", "qlora", "full") and "training_method" not in config_files_defined:
+        config.training_method = method
+    elif lora and "training_method" not in config_files_defined:
+        config.training_method = "lora"
+
+    libs = set(insights.get("libraries") or [])
+    if "deepspeed" in libs and config.distributed_strategy == "single":
+        config.framework = "deepspeed"
+        config.distributed_strategy = "deepspeed"
 
 
 def run_calibration_benchmark(

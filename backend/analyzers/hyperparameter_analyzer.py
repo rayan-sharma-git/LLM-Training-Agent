@@ -45,6 +45,36 @@ class HyperparameterAnalyzer:
             lora_dropout = lora_dropout or config_values.get("lora_dropout")
             gradient_accumulation = gradient_accumulation or config_values.get("gradient_accumulation")
 
+        # Values written directly in the training code (TrainingArguments(...),
+        # LoraConfig(...), EPOCHS = 3) fill whatever the config files did not
+        # define.  Config files stay authoritative: they are what the script
+        # usually loads, and code values are only the fallback.
+        code_values = self._values_from_insights(context)
+        from_code: set[str] = set()
+
+        def _fill(current, key):
+            if current is None and code_values.get(key) is not None:
+                from_code.add(key)
+                return code_values[key]
+            return current
+
+        lr = _fill(lr, "learning_rate")
+        batch_size = _fill(batch_size, "batch_size")
+        epochs = _fill(epochs, "epochs")
+        optimizer = _fill(optimizer, "optimizer")
+        lora_rank = _fill(lora_rank, "lora_rank")
+        lora_alpha = _fill(lora_alpha, "lora_alpha")
+        lora_dropout = _fill(lora_dropout, "lora_dropout")
+        gradient_accumulation = _fill(gradient_accumulation, "gradient_accumulation")
+        sequence_length = kwargs.get("sequence_length") or config_values.get("sequence_length") \
+            or code_values.get("sequence_length")
+        weight_decay = kwargs.get("weight_decay") or config_values.get("weight_decay") \
+            or code_values.get("weight_decay")
+        warmup_ratio = kwargs.get("warmup_ratio") or config_values.get("warmup_ratio") \
+            or code_values.get("warmup_ratio")
+        scheduler = kwargs.get("scheduler") or config_values.get("scheduler") \
+            or code_values.get("scheduler")
+
         # IMPORTANT: do not fabricate values when the user's configuration does
         # not define them. Missing values stay None and are reported explicitly
         # in the findings/recommendations so the report never presents invented
@@ -52,11 +82,18 @@ class HyperparameterAnalyzer:
         #
         # Track the provenance of every value so downstream layers (and the
         # user) can distinguish user/config-provided values from missing ones.
+        def _origin(key: str, value, kwarg: str) -> str:
+            if kwargs.get(kwarg):
+                return "user"
+            if value is None:
+                return "missing"
+            return "code" if key in from_code else "config"
+
         sources = {
-            "learning_rate": "user" if kwargs.get("learning_rate") else ("config" if lr else "missing"),
-            "batch_size": "user" if kwargs.get("batch_size") else ("config" if batch_size else "missing"),
-            "epochs": "user" if kwargs.get("epochs") else ("config" if epochs else "missing"),
-            "optimizer": "user" if kwargs.get("optimizer") else ("config" if optimizer else "missing"),
+            "learning_rate": _origin("learning_rate", lr, "learning_rate"),
+            "batch_size": _origin("batch_size", batch_size, "batch_size"),
+            "epochs": _origin("epochs", epochs, "epochs"),
+            "optimizer": _origin("optimizer", optimizer, "optimizer"),
         }
 
         # Step 1: Deterministic risk assessment (only over values that exist)
@@ -90,7 +127,8 @@ class HyperparameterAnalyzer:
             if origin == "missing":
                 findings.append(f"{display_names[key]}: not found in the project configuration.")
             else:
-                findings.append(f"{display_names[key]}: from {'request' if origin == 'user' else 'project configuration'}.")
+                label = {"user": "request", "code": "the training code"}.get(origin, "project configuration")
+                findings.append(f"{display_names[key]}: from {label}.")
 
         # Step 2: Optional LLM enhancement (only when real values exist)
         if self._llm.is_available and any(v is not None for v in known_core):
@@ -108,11 +146,11 @@ class HyperparameterAnalyzer:
             batch_size=batch_size,
             epochs=epochs,
             optimizer=optimizer,
-            scheduler=kwargs.get("scheduler"),
+            scheduler=scheduler,
             gradient_accumulation=gradient_accumulation,
-            weight_decay=kwargs.get("weight_decay"),
-            warmup_ratio=kwargs.get("warmup_ratio"),
-            sequence_length=kwargs.get("sequence_length"),
+            weight_decay=weight_decay,
+            warmup_ratio=warmup_ratio,
+            sequence_length=sequence_length,
             lora_rank=lora_rank,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
@@ -123,6 +161,41 @@ class HyperparameterAnalyzer:
             recommendations=recommendations,
             confidence=confidence,
         )
+
+    @staticmethod
+    def _values_from_insights(context: ProjectContext) -> Dict[str, Any]:
+        """Normalized values read from the project's training code (if inspected)."""
+        insights = getattr(context, "training_insights", None) or {}
+        args = insights.get("training_args") or {}
+        lora = insights.get("lora") or {}
+
+        def val(source: Dict[str, Any], key: str):
+            entry = source.get(key)
+            return entry.get("value") if isinstance(entry, dict) else None
+
+        def number(value, cast):
+            try:
+                return cast(float(value)) if cast is int else cast(value)
+            except (TypeError, ValueError):
+                return None
+
+        result: Dict[str, Any] = {
+            "learning_rate": number(val(args, "learning_rate"), float),
+            "batch_size": number(val(args, "per_device_train_batch_size"), int),
+            "epochs": number(val(args, "num_train_epochs"), int),
+            "gradient_accumulation": number(val(args, "gradient_accumulation_steps"), int),
+            "weight_decay": number(val(args, "weight_decay"), float),
+            "warmup_ratio": number(val(args, "warmup_ratio"), float),
+            "sequence_length": number(val(args, "max_seq_length") or val(args, "max_length"), int),
+            "lora_rank": number(val(lora, "r"), int),
+            "lora_alpha": number(val(lora, "lora_alpha"), int),
+            "lora_dropout": number(val(lora, "lora_dropout"), float),
+        }
+        optim = val(args, "optim")
+        scheduler = val(args, "lr_scheduler_type")
+        result["optimizer"] = str(optim) if optim else None
+        result["scheduler"] = str(scheduler) if scheduler else None
+        return result
 
     def _read_config_files(self, context: ProjectContext, config_path: Optional[str] = None) -> Dict[str, Any]:
         """Read hyperparameter values from YAML/TOML/JSON config files."""
